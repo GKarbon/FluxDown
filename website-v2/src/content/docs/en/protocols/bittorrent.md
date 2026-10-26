@@ -20,6 +20,20 @@ Multi-file torrents show a checklist of every file inside, with size, before the
 
 <!-- TODO(screenshot): New Download dialog file-selection list for a multi-file torrent -->
 
+## Existing task files
+
+Open a BitTorrent task's details and select **Files**. The list shows each file's verified downloaded bytes. Change the checkboxes and choose **Apply selection** to add, stop or continue files. Unchecking retains existing data, including partial files; shared pieces may give unselected files some downloaded bytes.
+
+Use **All files** and **Deselect all** to edit the selection; applying still requires at least one checked file. Multi-file torrents keep the torrent root directory even for a partial selection. A completed partial torrent can download additional files; this temporarily needs staging space for copies of its outputs. Legacy flat outputs are retained when a later completion adopts the root directory.
+
+Resolved magnet metadata is saved with the task and reused after a restart or selection change. Cached metadata is checked against the magnet info-hash locally; peers are needed only for the first resolution. Until that first resolution, file controls are unavailable. During initial checking, an outstanding first-choice dialog or final completion, a change may be rejected as busy; finish the dialog or retry after that phase. After a restart, incomplete per-file progress remains unknown until local verification creates a live handle. The Files page is available in Web, GPUI desktop, Android and the full iOS flavor.
+
+### Clean unselected downloaded data
+
+Stop the task (and seeding), apply a selection containing at least one file, then choose **Clean unselected data** and confirm. This **permanently deletes unselected downloaded data, including previously completed outputs**; it cannot be undone. Files still selected, unrelated files and outputs claimed by other tasks are protected. Only paths recorded for this task are considered; directories are never recursively removed.
+
+The host checks the confirmed selection again and rejects cleanup if it changed or any task writes are still active. Shared-piece boundary bytes needed by selected files remain in sparse staging or the `.parts` sidecar; cleanup therefore may retain some bytes and does not promise a particular amount of reclaimed disk space. A failure is reported and may be retried. Selecting a cleaned file later downloads its missing data again; availability depends on the torrent's peers. Cleanup never starts automatically when you uncheck a file.
+
 ## DHT, UPnP and listening port
 
 Peer discovery works out of the box: **DHT** (trackerless peer discovery) and **UPnP port mapping** (automatic router port forwarding) are always enabled by the engine — there's nothing to configure. The only connectivity option exposed in *Settings → BitTorrent* is the **Listen Port Range** used for incoming BT connections (default **6881–6891**).

@@ -34,6 +34,11 @@
 - **磁力元数据须随任务保留，不能仅依赖 rqbit 会话缓存**：首次解析后写 `torrent_files`；读旧缓存须先核对 info-hash 再固定到 DB，恢复/重选/做种复用本地字节；session delete 会移除 `{hash}.torrent` → `bt_downloader.rs::cached_torrent_bytes` 与 Phase 3。
 - **多文件种子部分选择完成后也须保留真实根容器**：不能只把 `file_name` 改为不存在的种子名；旧 flat 产物迁移保留文件并先登记 artifact，再替换 sidecar → `bt_downloader.rs::compute_completion_layout` 与完成阶段。
 
+- **手动清理未选文件必须先持久化共享边界与待删身份再 unlink**：`daemon.task.cleanBtUnselected` 包括完整产物，必须停止下载/做种、确认的 indices 与已应用范围一致；删除失败保留身份 journal，重试不得删除替代陌生文件，unlink（含重试时已缺失）的目录同步成功后才能退役记录 → `download_manager/bt_files/cleanup.rs`、`bt_partfile/cleanup.rs`。
+- **暂停/清理后恢复不可假定 cached handle 的选择仍正确**：在途 add 可能晚发布旧范围；无句柄但启动/暂停/add 尚未结束时改选返回 Busy，恢复时比较实际返回句柄的 `only_files` 与 DB，错配必须 detach/re-add，扩大范围重验字节，不能绕过完成校验 → `download_manager.rs`、`download_manager/bt_files.rs`；受控回归 `bt_files_reselect_pause_clean_append_all_and_restart_preserve_data`。
+
+- **既有任务动态取消文件不能触发完成/启动清理删除部分数据**：`bt_preserve_stage_<task_id>` 保留下载过但当前未选中的 staging，启动 rescue 也必须跳过；完成后追加先复制原产物和 `.parts` 边界到可写 staging，旧产物只校验保留，不能再次 noreplace 搬到自己已有的路径 → `download_manager/bt_files.rs`、`bt_downloader.rs`、`bt_partfile.rs`。
+
 另见 AGENTS.md §4：BT 判定只认 `magnet:` 与 `torrent-file://`、「复制链接」读 `origin_url`、`dht.json` 撞端口排除区间。
 
 - **种子内相对路径必须过 `torrent_relative_path_is_safe`，且 Windows 规则只对 Windows 强加**：Windows 下组件内的 `:`（盘符前缀 / ADS）、控制字符、设备保留名会改写基路径或落到设备；这些在其他平台是合法文件名，不得误杀 → `native/engine/src/bt_downloader.rs::torrent_relative_path_is_safe`（含 `a:b` 非 Windows 放行断言）。
