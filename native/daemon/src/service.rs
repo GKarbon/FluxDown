@@ -186,6 +186,59 @@ impl DaemonService {
                         .inspect(|snapshot| list_tasks(snapshot, &params))?,
                 )
             }
+            method::DAEMON_TASK_BT_FILES => {
+                let params = parse_params::<IdParams>(params)?;
+                match self
+                    .actor
+                    .execute(ActorOperation::BtTaskFiles { task_id: params.id })
+                    .await
+                {
+                    Ok(ActorResult::BtTaskFiles(result)) => to_value(result),
+                    Ok(_) => Err(internal_error("unexpected actor result".into())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
+            method::DAEMON_TASK_CLEAN_BT_UNSELECTED => {
+                let params = parse_params::<fluxdown_protocol::SetBtTaskFilesParams>(params)?;
+                self.execute_unit(ActorOperation::CleanBtUnselected {
+                    task_id: params.task_id,
+                    indices: params.indices,
+                })
+                .await
+            }
+            method::DAEMON_TASK_SET_BT_FILES => {
+                let params = parse_params::<fluxdown_protocol::SetBtTaskFilesParams>(params)?;
+                #[cfg(feature = "bt")]
+                match self
+                    .actor
+                    .execute(ActorOperation::PrepareBtTaskFiles {
+                        task_id: params.task_id.clone(),
+                        indices: params.indices.clone(),
+                    })
+                    .await
+                {
+                    #[cfg(feature = "bt")]
+                    Ok(ActorResult::BtFilePreparation(preparation)) => {
+                        if let Some(preparation) = preparation {
+                            tokio::task::spawn_blocking(move || preparation.restore())
+                                .await
+                                .map_err(|e| internal_error(format!("BT file preparation: {e}")))?
+                                .map_err(|e| {
+                                    actor_error(ActorCallError::Operation(
+                                        crate::actor::bt_files_error(e),
+                                    ))
+                                })?;
+                        }
+                    }
+                    Ok(_) => return Err(internal_error("unexpected actor result".into())),
+                    Err(error) => return Err(actor_error(error)),
+                }
+                self.execute_unit(ActorOperation::SetBtTaskFiles {
+                    task_id: params.task_id,
+                    indices: params.indices,
+                })
+                .await
+            }
             method::DAEMON_TASK_GET => {
                 let params = parse_params::<IdParams>(params)?;
                 let task = self

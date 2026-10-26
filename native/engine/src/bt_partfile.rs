@@ -44,6 +44,9 @@ use crate::logger::{log_info, log_warn};
 //   [12..12+header_len)  JSON header（PartsHeader）
 //   [12+header_len..)    blob（各 SegmentEntry 的字节按 blob_offset 排布）
 
+mod cleanup;
+pub(crate) use cleanup::clean_unselected_outputs;
+
 const PARTS_MAGIC: &[u8; 8] = b"FXPARTS1";
 const PARTS_VERSION: u32 = 1;
 /// header JSON 长度上限（正常几 KB；超限视为损坏，防解析放大）。
@@ -71,6 +74,8 @@ struct PartsHeader {
     total_length: u64,
     selected: Vec<SelectedEntry>,
     segments: Vec<SegmentEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_cleanup: Vec<cleanup::PendingCleanup>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -263,6 +268,7 @@ pub fn write_sidecar(req: &SidecarWriteRequest) -> Result<usize, String> {
         total_length: req.total_length,
         selected: selected_entries,
         segments: segment_entries,
+        pending_cleanup: cleanup::pending_for_write(req)?,
     };
     let header_json = serde_json::to_vec(&header).map_err(|e| format!("serialize header: {e}"))?;
     let header_len = u32::try_from(header_json.len()).map_err(|_| "header too large")?;
@@ -346,6 +352,7 @@ struct SeedLayout {
     /// file_id → 边界区间（按 offset 升序）。
     parts: HashMap<usize, Vec<SegSpec>>,
     max_file_id: usize,
+    pending_paths: Vec<PathBuf>,
 }
 
 /// 从边车构建的做种 storage 工厂。注入 `AddTorrentOptions.storage_factory`
@@ -392,6 +399,15 @@ impl SidecarLayout {
     /// 选中文件 `file_id` 的最终磁盘路径。
     pub fn selected_path(&self, file_id: usize) -> Option<&Path> {
         self.inner.selected.get(&file_id).map(PathBuf::as_path)
+    }
+
+    /// Completed outputs recorded by this task, including currently unselected files.
+    pub(crate) fn selected_paths(&self) -> impl Iterator<Item = &Path> {
+        self.inner
+            .selected
+            .values()
+            .chain(self.inner.pending_paths.iter())
+            .map(PathBuf::as_path)
     }
 
     /// 打开边界字节读取器（只读；无任何边界区间时不打开 blob）。
@@ -470,9 +486,6 @@ fn load_seed_layout(sidecar_path: &Path, save_dir: &Path) -> Result<Option<SeedL
         }
         max_file_id = max_file_id.max(entry.file_id);
     }
-    if selected.is_empty() {
-        return Err("sidecar has no selected files".to_string());
-    }
     let mut parts: HashMap<usize, Vec<SegSpec>> = HashMap::new();
     for entry in &header.segments {
         if selected.contains_key(&entry.file_id) {
@@ -496,13 +509,138 @@ fn load_seed_layout(sidecar_path: &Path, save_dir: &Path) -> Result<Option<SeedL
         segs.sort_by_key(|s| s.offset);
     }
 
+    let mut pending_paths = Vec::new();
+    if !header.pending_cleanup.is_empty() {
+        // Trust the configured root alias (e.g. macOS /var), but never follow
+        // symlinks inside an output mapping when deciding deletion ownership.
+        let pending_root = match std::fs::canonicalize(save_dir) {
+            Ok(root) => Some(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("resolve pending output root: {error}")),
+        };
+        for entry in &header.pending_cleanup {
+            // Validate even missing-root entries without granting ownership.
+            let path =
+                resolve_rel_path(&entry.rel_path, pending_root.as_deref().unwrap_or(save_dir))?;
+            if pending_root.is_some() && cleanup::pending_path_owned(entry, &path) {
+                pending_paths.push(path);
+            }
+        }
+    }
     Ok(Some(SeedLayout {
         sidecar_path: sidecar_path.to_path_buf(),
         info_hash: header.info_hash,
         selected,
         parts,
         max_file_id,
+        pending_paths,
     }))
+}
+
+/// Restore completed bytes and shared-piece ranges into writable staging for an append.
+/// Original final files and the sidecar remain intact until normal completion.
+pub(crate) fn restore_download_stage(
+    sidecar: &Path,
+    save_dir: &Path,
+    stage: &Path,
+    files: &[crate::download_manager::BtTaskFile],
+    info_hash: &str,
+    cancelled: &AtomicBool,
+    closing: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    let layout = load_seed_layout(sidecar, save_dir)?.ok_or("completion sidecar is unavailable")?;
+    if layout.info_hash != info_hash {
+        return Err("completion sidecar belongs to another torrent".into());
+    }
+    std::fs::create_dir_all(stage).map_err(|e| format!("create BT stage: {e}"))?;
+    let mut blob = File::open(sidecar).map_err(|e| format!("open BT sidecar: {e}"))?;
+    for file in files {
+        if cancelled.load(Ordering::Acquire) || closing.is_cancelled() {
+            return Err("BT append was cancelled".into());
+        }
+        let id = usize::try_from(file.index).map_err(|e| e.to_string())?;
+        let relative = Path::new(&file.path);
+        if !crate::bt_downloader::torrent_relative_path_is_safe(relative, cfg!(windows)) {
+            return Err("unsafe torrent path".into());
+        }
+        let dst = stage.join(relative);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        // A crash during a previous append may have already restored this file.
+        if dst.exists() {
+            continue;
+        }
+        let temporary = dst.with_file_name(format!(".fluxdown-restore-{}", uuid::Uuid::new_v4()));
+        let mut out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|e| e.to_string())?;
+        let _temporary_guard = RestoreTemporary(temporary.clone());
+        if let Some(src) = layout.selected.get(&id) {
+            let mut input = File::open(src).map_err(|e| format!("open completed BT file: {e}"))?;
+            copy_retained_bytes(&mut input, &mut out, cancelled, closing)
+                .map_err(|e| e.to_string())?;
+        } else if let Some(segments) = layout.parts.get(&id) {
+            for segment in segments {
+                blob.seek(SeekFrom::Start(segment.blob_pos))
+                    .map_err(|e| e.to_string())?;
+                out.seek(SeekFrom::Start(segment.offset))
+                    .map_err(|e| e.to_string())?;
+                copy_retained_bytes(
+                    &mut Read::by_ref(&mut blob).take(segment.len),
+                    &mut out,
+                    cancelled,
+                    closing,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        out.set_len(u64::try_from(file.size).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        out.sync_all().map_err(|e| e.to_string())?;
+        drop(out);
+        if cancelled.load(Ordering::Acquire) || closing.is_cancelled() {
+            return Err("BT append was cancelled".into());
+        }
+        std::fs::rename(&temporary, &dst).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+struct RestoreTemporary(PathBuf);
+
+impl Drop for RestoreTemporary {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log_warn!(
+                "[BT] append temporary cleanup failed for '{}': {error:#}",
+                self.0.display()
+            );
+        }
+    }
+}
+
+fn copy_retained_bytes(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    cancelled: &AtomicBool,
+    closing: &tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        if cancelled.load(Ordering::Acquire) || closing.is_cancelled() {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let len = input.read(&mut buffer)?;
+        if len == 0 {
+            return Ok(());
+        }
+        output.write_all(buffer.get(..len).ok_or(std::io::ErrorKind::InvalidData)?)?;
+    }
 }
 
 /// 把工厂装箱为 `BoxStorageFactory` 的自定义包装。
@@ -824,6 +962,10 @@ impl TorrentStorage for PartsSeedStorage {
                 pread_file(f, offset, buf)
             }
             Some(Slot::Parts { segments }) => {
+                if segments.is_empty() {
+                    buf.fill(0);
+                    return Ok(());
+                }
                 let had_gap =
                     self.blob_read(|blob| read_parts_ranges(blob, segments, offset, buf))?;
                 if had_gap {
@@ -849,6 +991,9 @@ impl TorrentStorage for PartsSeedStorage {
                 pwrite_file(f, offset, buf)
             }
             Some(Slot::Parts { segments }) => {
+                if segments.is_empty() {
+                    return Ok(());
+                }
                 let dropped =
                     self.blob_read(|blob| write_parts_ranges(blob, segments, offset, buf))?;
                 if dropped {

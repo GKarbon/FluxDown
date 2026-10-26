@@ -724,6 +724,28 @@ pub fn ytdlp_versions_to_dto(
     }
 }
 
+/// Map existing-task BT files without changing index, progress or selection semantics.
+#[cfg(feature = "bt")]
+pub fn bt_task_files_to_dto(
+    value: fluxdown_engine::download_manager::BtTaskFiles,
+) -> fluxdown_protocol::BtTaskFilesDto {
+    fluxdown_protocol::BtTaskFilesDto {
+        task_id: value.task_id,
+        metadata_ready: value.metadata_ready,
+        files: value
+            .files
+            .into_iter()
+            .map(|f| fluxdown_protocol::BtTaskFileDto {
+                index: f.index,
+                path: f.path,
+                size: f.size,
+                downloaded_bytes: f.downloaded_bytes,
+                selected: f.selected,
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{queue_order_entry_to_dto, queue_position_to_dto};

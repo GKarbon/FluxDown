@@ -12,6 +12,9 @@ export const METHOD = {
 
   DAEMON_TASK_LIST: 'daemon.task.list',
   DAEMON_TASK_GET: 'daemon.task.get',
+  DAEMON_TASK_BT_FILES: 'daemon.task.btFiles',
+  DAEMON_TASK_SET_BT_FILES: 'daemon.task.setBtFiles',
+  DAEMON_TASK_CLEAN_BT_UNSELECTED: 'daemon.task.cleanBtUnselected',
   DAEMON_TASK_ACTIVITY: 'daemon.task.activity',
   DAEMON_TASK_SPEED_HISTORY: 'daemon.task.speedHistory',
   DAEMON_TASK_CREATE: 'daemon.task.create',

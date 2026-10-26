@@ -4,6 +4,7 @@ mod auto_multipath;
 mod bt_file_selection;
 mod bt_parts_reseed;
 mod bt_sparse_add;
+mod bt_task_files;
 mod change_url_resume;
 mod completion_naming;
 mod corruption_test;

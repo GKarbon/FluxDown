@@ -116,6 +116,9 @@ const VERIFY_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 // `daemon.task.list` 在任务数超过 5000 时服务端报错（需分页），Web 不再封装：任务表一律来自
 // store 的快照 + `system.taskPage` 载入。
 const task = {
+  btFiles: (params: TaskIdParams) => call<import('../protocol').BtTaskFilesDto>(METHOD.DAEMON_TASK_BT_FILES, params, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
+  cleanBtUnselected: (params: import('../protocol').SetBtTaskFilesParams) => call<OkResult>(METHOD.DAEMON_TASK_CLEAN_BT_UNSELECTED, params, { timeoutMs: VERIFY_TIMEOUT_MS }),
+  setBtFiles: (params: import('../protocol').SetBtTaskFilesParams) => call<OkResult>(METHOD.DAEMON_TASK_SET_BT_FILES, params, { timeoutMs: VERIFY_TIMEOUT_MS }),
   get: async (params: TaskIdParams) =>
     normalizeTask(await call<TaskDtoWire>(METHOD.DAEMON_TASK_GET, params)),
   activity: (params: TaskActivityQuery) =>

@@ -14,6 +14,12 @@ pub const SYSTEM_SHUTDOWN: &str = "system.shutdown";
 
 pub const DAEMON_TASK_LIST: &str = "daemon.task.list";
 pub const DAEMON_TASK_GET: &str = "daemon.task.get";
+/// Read existing BT file metadata and verified per-file progress (`IdParams` → `BtTaskFilesDto`).
+pub const DAEMON_TASK_BT_FILES: &str = "daemon.task.btFiles";
+/// Replace the selected set without deleting data (`SetBtTaskFilesParams` → `OkResult`).
+pub const DAEMON_TASK_SET_BT_FILES: &str = "daemon.task.setBtFiles";
+/// Explicitly delete stopped-task unselected data and completed outputs, checking the confirmed selection (`SetBtTaskFilesParams` → `OkResult`).
+pub const DAEMON_TASK_CLEAN_BT_UNSELECTED: &str = "daemon.task.cleanBtUnselected";
 pub const DAEMON_TASK_ACTIVITY: &str = "daemon.task.activity";
 /// 单任务速度历史（`TaskSpeedHistoryQuery` → `Option<TaskSpeedHistoryDto>`）。
 pub const DAEMON_TASK_SPEED_HISTORY: &str = "daemon.task.speedHistory";
@@ -426,6 +432,9 @@ pub const ALL_METHODS: &[&str] = &[
     SYSTEM_SHUTDOWN,
     DAEMON_TASK_LIST,
     DAEMON_TASK_GET,
+    DAEMON_TASK_BT_FILES,
+    DAEMON_TASK_SET_BT_FILES,
+    DAEMON_TASK_CLEAN_BT_UNSELECTED,
     DAEMON_TASK_ACTIVITY,
     DAEMON_TASK_SPEED_HISTORY,
     DAEMON_TASK_CREATE,
@@ -693,6 +702,9 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_DIAGNOSTICS_PROBE,
     DAEMON_DIAGNOSTICS_FIX_COMPONENT,
     DAEMON_TASK_VERIFY,
+    DAEMON_TASK_BT_FILES,
+    DAEMON_TASK_SET_BT_FILES,
+    DAEMON_TASK_CLEAN_BT_UNSELECTED,
     DAEMON_EGRESS_PLAN,
 ];
 

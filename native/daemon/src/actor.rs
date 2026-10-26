@@ -70,6 +70,21 @@ pub enum ActorOperation {
         task_id: String,
         delete_files: bool,
     },
+    PrepareBtTaskFiles {
+        task_id: String,
+        indices: Vec<i32>,
+    },
+    BtTaskFiles {
+        task_id: String,
+    },
+    CleanBtUnselected {
+        task_id: String,
+        indices: Vec<i32>,
+    },
+    SetBtTaskFiles {
+        task_id: String,
+        indices: Vec<i32>,
+    },
     PauseAll,
     ResumeAll,
     RescanFiles,
@@ -266,6 +281,9 @@ pub enum ActorResult {
     WebhookSimulation(usize),
     WebhookTest(Box<fluxdown_engine::webhook::WebhookDelivery>),
     TaskVerify(fluxdown_protocol::TaskVerifyResult),
+    BtTaskFiles(fluxdown_protocol::BtTaskFilesDto),
+    #[cfg(feature = "bt")]
+    BtFilePreparation(Option<fluxdown_engine::download_manager::BtFilePreparation>),
 }
 
 /// actor 领域错误。
@@ -361,6 +379,17 @@ impl DaemonActorHandle {
             .await
             .map_err(|_| ActorCallError::Unavailable)?;
         response.await.map_err(|_| ActorCallError::Unavailable)
+    }
+}
+
+#[cfg(feature = "bt")]
+pub(crate) fn bt_files_error(error: fluxdown_engine::download_manager::BtFilesError) -> ActorError {
+    use fluxdown_engine::download_manager::BtFilesError;
+    match error {
+        BtFilesError::NotFound => ActorError::NotFound,
+        BtFilesError::Invalid(message) => ActorError::InvalidArgument(message),
+        BtFilesError::Busy(message) => ActorError::Conflict(message),
+        BtFilesError::Operation(message) => ActorError::Operation(message),
     }
 }
 
@@ -845,6 +874,30 @@ async fn dispatch_operation(
                 }
             });
         }
+        #[cfg_attr(not(feature = "bt"), allow(unused_variables))]
+        ActorOperation::BtTaskFiles { task_id } => {
+            #[cfg(feature = "bt")]
+            {
+                let future = engine.manager.bt_task_files_future(task_id);
+                tokio::spawn(async move {
+                    let result = future
+                        .await
+                        .map(fluxdown_engine_protocol::bt_task_files_to_dto)
+                        .map(ActorResult::BtTaskFiles)
+                        .map_err(bt_files_error);
+                    if ack.send(result).is_err() {
+                        tracing::debug!("BT file query caller disconnected");
+                    }
+                });
+            }
+            #[cfg(not(feature = "bt"))]
+            if ack
+                .send(Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.into())))
+                .is_err()
+            {
+                tracing::debug!("BT file query caller disconnected");
+            }
+        }
         operation => {
             let result = execute_operation(operation, engine, events).await;
             if let Err(result) = ack.send(result) {
@@ -971,6 +1024,40 @@ async fn execute_operation(
             return Ok(ActorResult::CreatedMany(
                 outcomes.into_iter().map(create_task_outcome).collect(),
             ));
+        }
+        #[cfg_attr(not(feature = "bt"), allow(unused_variables))]
+        ActorOperation::PrepareBtTaskFiles { task_id, indices } => {
+            #[cfg(feature = "bt")]
+            return engine
+                .manager
+                .prepare_bt_task_file_change(&task_id, &indices)
+                .await
+                .map(ActorResult::BtFilePreparation)
+                .map_err(bt_files_error);
+            #[cfg(not(feature = "bt"))]
+            return Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.into()));
+        }
+        #[cfg_attr(not(feature = "bt"), allow(unused_variables))]
+        ActorOperation::CleanBtUnselected { task_id, indices } => {
+            #[cfg(feature = "bt")]
+            engine
+                .manager
+                .clean_bt_unselected(&task_id, &indices)
+                .await
+                .map_err(bt_files_error)?;
+            #[cfg(not(feature = "bt"))]
+            return Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.into()));
+        }
+        #[cfg_attr(not(feature = "bt"), allow(unused_variables))]
+        ActorOperation::SetBtTaskFiles { task_id, indices } => {
+            #[cfg(feature = "bt")]
+            engine
+                .manager
+                .commit_bt_task_files(&task_id, &indices)
+                .await
+                .map_err(bt_files_error)?;
+            #[cfg(not(feature = "bt"))]
+            return Err(ActorError::InvalidArgument(BT_DISABLED_MESSAGE.into()));
         }
         ActorOperation::PauseTask { task_id } => engine.manager.pause_task(&task_id).await,
         ActorOperation::ResumeTask { task_id } => {
@@ -1270,6 +1357,7 @@ async fn execute_operation(
         | ActorOperation::RssValidate { .. }
         | ActorOperation::LinkProbe { .. }
         | ActorOperation::VerifyTask { .. }
+        | ActorOperation::BtTaskFiles { .. }
         | ActorOperation::WebhookTest { .. }
         | ActorOperation::TestProxy { .. } => unreachable!("handled off actor"),
         ActorOperation::WebhookDeliveries => {

@@ -38,6 +38,10 @@ use crate::selection::HostSelection;
 use crate::speed_limiter::SpeedLimiter;
 use crate::transfer_activity::TaskRuntime;
 
+#[cfg(feature = "bt")]
+pub(crate) mod bt_files;
+#[cfg(feature = "bt")]
+pub use bt_files::{BtFilePreparation, BtFilesError, BtTaskFile, BtTaskFiles};
 mod boost;
 mod group_dirs;
 pub use boost::BoostError;
@@ -1189,10 +1193,19 @@ async fn delete_task_artifact_files(
     task_id: &str,
     save_dir: &str,
     exclude: &[String],
+    is_bt: bool,
 ) -> Result<(), downloader::DownloadError> {
     let names = db.load_task_artifacts(task_id).await?;
     let mut first_error = None;
     for name in names {
+        // BT container ownership is cleaned by its sidecar file mappings.
+        if is_bt
+            && tokio::fs::symlink_metadata(PathBuf::from(save_dir).join(&name))
+                .await
+                .is_ok_and(|metadata| metadata.is_dir())
+        {
+            continue;
+        }
         if is_safe_file_name(&name)
             && !file_name_claimed_by_others(db, save_dir, &name, exclude).await
             && let Err(error) = tokio::fs::remove_file(PathBuf::from(save_dir).join(&name)).await
@@ -1209,6 +1222,55 @@ async fn delete_task_artifact_files(
     } else {
         Ok(())
     }
+}
+
+#[cfg(feature = "bt")]
+async fn bt_completed_paths(
+    app_data_dir: &str,
+    task_id: &str,
+    save_dir: &str,
+) -> Result<Vec<PathBuf>, downloader::DownloadError> {
+    let sidecar = crate::bt_partfile::sidecar_path(app_data_dir, task_id);
+    let save = PathBuf::from(save_dir);
+    tokio::task::spawn_blocking(move || {
+        crate::bt_partfile::load_sidecar_layout(&sidecar, &save)
+            .map(|layout| {
+                layout.map_or_else(Vec::new, |layout| {
+                    layout.selected_paths().map(Path::to_path_buf).collect()
+                })
+            })
+            .map_err(downloader::DownloadError::Other)
+    })
+    .await
+    .map_err(|error| downloader::DownloadError::Other(error.to_string()))?
+}
+
+/// Remove only the mapped file and empty parents, never recursively remove siblings.
+async fn remove_owned_bt_output(path: &Path, save_dir: &Path) -> std::io::Result<()> {
+    // Top-level artifact records may name an older container. Its mapped
+    // files below are removed individually; never recursively delete it.
+    if tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Ok(());
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut parent = path.parent();
+    while let Some(directory) = parent {
+        if directory == save_dir || !directory.starts_with(save_dir) {
+            break;
+        }
+        if tokio::fs::remove_dir(directory).await.is_err() {
+            break;
+        }
+        parent = directory.parent();
+    }
+    Ok(())
 }
 
 /// 批量删除时等待单个被删下载退出的上限；超时后 abort 并安排延迟二次清理。
@@ -1324,6 +1386,13 @@ async fn run_delete_cleanup(job: DeleteCleanup) -> Result<(), downloader::Downlo
             ))),
         }
     };
+    #[cfg(feature = "bt")]
+    if result.is_ok() && files.is_bt {
+        crate::bt_partfile::remove_sidecar(&crate::bt_partfile::sidecar_path(
+            &app_data_dir,
+            &task_id,
+        ));
+    }
     // F010：下载未按时退出时可能仍在写盘，延迟二次清理兜底孤立文件，与单任务路径一致。
     if handle_timed_out {
         let deferred_delete_files = if files.is_bt {
@@ -1344,27 +1413,34 @@ async fn run_delete_cleanup(job: DeleteCleanup) -> Result<(), downloader::Downlo
 
 #[cfg(feature = "bt")]
 /// 把 BT 任务移出 librqbit 会话（会话持久化与可选的文件一并清理）。句柄尚未落位
-/// （磁力解析中 / 重新做种校验中）时登记待删，由落位方清理；无会话时直接删 parts 边车。
+/// （磁力解析中 / 重新做种校验中）时登记待删。parts 边车由成功的磁盘清理统一删除。
 async fn remove_from_bt_session(
     task_id: &str,
     bt_session: Option<&SharedBtSession>,
     app_data_dir: &str,
     delete_files: bool,
 ) -> Result<(), downloader::DownloadError> {
+    // Parts storage maps final outputs; manager ownership filters decide which
+    // of those may be removed. Rqbit may only delete ordinary staging storage.
+    let delete_files = delete_files
+        && !tokio::fs::try_exists(crate::bt_partfile::sidecar_path(app_data_dir, task_id))
+            .await
+            .unwrap_or(true);
     let Some(bt) = bt_session else {
-        crate::bt_partfile::remove_sidecar(&crate::bt_partfile::sidecar_path(
-            app_data_dir,
-            task_id,
-        ));
         return Ok(());
     };
-    if !bt.delete_task(task_id, delete_files).await? {
+    if !bt
+        .delete_task_preserving_parts(task_id, delete_files)
+        .await?
+    {
         bt.register_pending_delete(task_id, delete_files).await;
         // 二次检查（同单任务删除路径）：miss 与 pending 写入之间句柄可能落位，
         // 消费自己的 pending 走正常删除，防幽灵做种条目。
         if bt.cached_handle(task_id).await.is_some()
             && let Some(pending_delete_files) = bt.take_pending_delete(task_id).await
-            && !bt.delete_task(task_id, pending_delete_files).await?
+            && !bt
+                .delete_task_preserving_parts(task_id, pending_delete_files)
+                .await?
         {
             tracing::debug!("late BT handle already removed");
         }
@@ -1440,7 +1516,12 @@ async fn remove_deleted_task_files(
         }
     }
     for artifact in &files.artifacts {
-        keep_first_cleanup_error(&mut first_error, tokio::fs::remove_file(artifact).await);
+        let result = if files.is_bt {
+            remove_owned_bt_output(artifact, Path::new(&files.save_dir)).await
+        } else {
+            tokio::fs::remove_file(artifact).await
+        };
+        keep_first_cleanup_error(&mut first_error, result);
     }
     match first_error {
         Some(error) => Err(error.into()),
@@ -8267,9 +8348,26 @@ impl DownloadManager {
                 // Owned tuples:rescue 内含 move_path(最坏 2s 瞬时锁重试退避),
                 // 必须经 spawn_blocking 跑,不能在 current_thread runtime 上同步
                 // 阻塞(会冻结进度上报/FFI 响应)。
+                let preserved_stages: HashSet<String> =
+                    match self.db.list_config_with_prefix("bt_preserve_stage_").await {
+                        Ok(entries) => entries
+                            .into_iter()
+                            .filter_map(|(key, _)| {
+                                key.strip_prefix("bt_preserve_stage_").map(str::to_owned)
+                            })
+                            .collect(),
+                        Err(error) => {
+                            crate::logger::report_error(
+                                "download-manager",
+                                "load preserved BT stages",
+                                &error,
+                            );
+                            task_map.keys().map(|id| (*id).to_owned()).collect()
+                        }
+                    };
                 let mut rescue_input: Vec<(String, String, String)> = Vec::new();
                 for (&id, (status, save_dir, file_name, _)) in &task_map {
-                    if *status != 3 {
+                    if *status != 3 || preserved_stages.contains(id) {
                         continue;
                     }
                     let stage = bt_downloader::bt_stage_dir(save_dir, id);
@@ -8401,6 +8499,11 @@ impl DownloadManager {
                         }
                         let task_id_str = &name_str[bt_downloader::BT_STAGE_PREFIX.len()..];
                         let path = entry.path();
+                        if task_map.contains_key(task_id_str)
+                            && preserved_stages.contains(task_id_str)
+                        {
+                            continue;
+                        }
 
                         match task_map.get(task_id_str) {
                             None => {
@@ -11791,6 +11894,81 @@ impl DownloadManager {
                     return;
                 };
 
+                let persisted_selection = match self.db.load_bt_selected_files(task_id).await {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "load BT selection for resume",
+                            &error,
+                        );
+                        self.active_tasks.remove(task_id);
+                        return;
+                    }
+                };
+                // Build the torrent source for resume: if the task was created
+                // from a .torrent file, load the persisted bytes from DB.
+                let cached_torrent = match bt_downloader::cached_torrent_bytes(
+                    &self.db,
+                    task_id,
+                    &task.url,
+                    &self.app_data_dir,
+                )
+                .await
+                {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "load BT metadata for resume",
+                            error.as_ref(),
+                        );
+                        let message = format!("cannot load BT metadata: {error:#}");
+                        if let Err(db_error) =
+                            self.db.update_task_status(task_id, 4, &message).await
+                        {
+                            crate::logger::report_error(
+                                "download-manager",
+                                "persist BT metadata error",
+                                &db_error,
+                            );
+                        }
+                        self.active_tasks.remove(task_id);
+                        self.sync_queue_occupancy();
+                        self.emit_progress_from_db(
+                            task_id,
+                            4,
+                            task.seeding_status,
+                            &task.seeding_message,
+                            0,
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let torrent_source = if is_torrent_file_url(&task.url) || cached_torrent.is_some() {
+                    let bytes = cached_torrent.unwrap_or_default();
+                    if bytes.is_empty() {
+                        log_info!(
+                            "[manager] BT task {} has torrent-file:// URL but no persisted bytes!",
+                            task_id
+                        );
+                        let msg = "torrent file bytes lost — cannot resume";
+                        if let Err(error) = self.db.update_task_status(task_id, 4, msg).await {
+                            crate::logger::report_error(
+                                "download-manager",
+                                "persist task state",
+                                &error,
+                            );
+                        }
+                        self.active_tasks.remove(task_id);
+                        return;
+                    }
+                    TorrentSource::TorrentFileBytes(bytes)
+                } else {
+                    TorrentSource::Magnet(task.url.clone())
+                };
+
                 // Try to resume from a cached handle (pause→resume within the
                 // same app session).  If the handle is found, unpause it and
                 // pass it to the download loop so it skips add_torrent entirely.
@@ -11801,6 +11979,23 @@ impl DownloadManager {
                         None
                     }
                 };
+
+                // Validate the actual returned handle, including a late add published after Pause.
+                if let (Some(handle), Some(wanted)) =
+                    (existing.as_ref(), persisted_selection.as_ref())
+                    && !bt_files::handle_selection_matches(handle, wanted)
+                {
+                    if let Err(error) = bt_ref.detach_for_file_change(task_id).await {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "discard mismatched BT selection",
+                            &error,
+                        );
+                        self.active_tasks.remove(task_id);
+                        return;
+                    }
+                    existing = None;
+                }
 
                 // Guard: if the user deleted the download files while the task
                 // was paused (within the same app session), the cached handle's
@@ -11849,36 +12044,6 @@ impl DownloadManager {
                     }
                 }
 
-                // Build the torrent source for resume: if the task was created
-                // from a .torrent file, load the persisted bytes from DB.
-                let torrent_source = if is_torrent_file_url(&task.url) {
-                    let bytes = self
-                        .db
-                        .load_torrent_file_bytes(task_id)
-                        .await
-                        .unwrap_or_default()
-                        .unwrap_or_default();
-                    if bytes.is_empty() {
-                        log_info!(
-                            "[manager] BT task {} has torrent-file:// URL but no persisted bytes!",
-                            task_id
-                        );
-                        let msg = "torrent file bytes lost — cannot resume";
-                        if let Err(error) = self.db.update_task_status(task_id, 4, msg).await {
-                            crate::logger::report_error(
-                                "download-manager",
-                                "persist task state",
-                                &error,
-                            );
-                        }
-                        self.active_tasks.remove(task_id);
-                        return;
-                    }
-                    TorrentSource::TorrentFileBytes(bytes)
-                } else {
-                    TorrentSource::Magnet(task.url.clone())
-                };
-
                 // Load the persisted file selection from DB so that resumes
                 // (including across app restarts where the in-memory handle is
                 // gone) skip the file-selection dialog entirely.
@@ -11892,12 +12057,7 @@ impl DownloadManager {
                 // already has the correct state; had_existing_handle=true in
                 // bt_download_inner skips Phase 3.5 regardless of what we pass here.
                 let (pre_selected_indices, skip_file_selection) = if existing.is_none() {
-                    match self
-                        .db
-                        .load_bt_selected_files(task_id)
-                        .await
-                        .unwrap_or(None)
-                    {
+                    match persisted_selection {
                         None => {
                             // Never confirmed — let Phase 3.5 show the dialog.
                             (Vec::new(), false)
@@ -11926,7 +12086,9 @@ impl DownloadManager {
                         .load_bt_custom_name(task_id)
                         .await
                         .unwrap_or_default();
-                    let dn_echo = torrent_source.display_name().unwrap_or_default();
+                    let dn_echo = TorrentSource::Magnet(task.url.clone())
+                        .display_name()
+                        .unwrap_or_default();
                     if !loaded.is_empty() && loaded == dn_echo {
                         String::new()
                     } else {
@@ -12505,11 +12667,61 @@ impl DownloadManager {
             if is_bt_url(&t.url) {
                 #[cfg(feature = "bt")]
                 {
+                    if delete_files && !adopted {
+                        match bt_completed_paths(&self.app_data_dir, task_id, &t.save_dir).await {
+                            Ok(paths) => {
+                                for output in paths {
+                                    let Some(top) = output
+                                        .strip_prefix(&t.save_dir)
+                                        .ok()
+                                        .and_then(|relative| relative.components().next())
+                                    else {
+                                        continue;
+                                    };
+                                    let top = top.as_os_str().to_string_lossy();
+                                    if !file_name_claimed_by_others(
+                                        &self.db,
+                                        &t.save_dir,
+                                        &top,
+                                        &[task_id.to_string()],
+                                    )
+                                    .await
+                                        && let Err(error) =
+                                            remove_owned_bt_output(&output, Path::new(&t.save_dir))
+                                                .await
+                                        && cleanup_error.is_none()
+                                    {
+                                        cleanup_error = Some(error.into());
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                cleanup_error = Some(error);
+                            }
+                        }
+                    }
+                    if let Some(error) = cleanup_error.as_ref() {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "remove completed BT files",
+                            error,
+                        );
+                        self.drain_queue().await;
+                        return;
+                    }
                     // Permanently remove from librqbit session (clears
                     // persistence data and optionally deletes files via
                     // librqbit's own cleanup).
+                    let delete_session_files = delete_files
+                        && !tokio::fs::try_exists(crate::bt_partfile::sidecar_path(
+                            &self.app_data_dir,
+                            task_id,
+                        ))
+                        .await
+                        .unwrap_or(true);
                     if let Some(ref bt) = self.bt_session {
-                        let handle_found = match bt.delete_task(task_id, delete_files).await {
+                        let handle_found = match bt.delete_task(task_id, delete_session_files).await
+                        {
                             Ok(found) => found,
                             Err(error) => {
                                 crate::logger::report_error(
@@ -12528,7 +12740,8 @@ impl DownloadManager {
                             // Register a pending delete so the detached
                             // add_torrent closure / reseed closure cleans up the
                             // librqbit session entry (and files) once it resolves.
-                            bt.register_pending_delete(task_id, delete_files).await;
+                            bt.register_pending_delete(task_id, delete_session_files)
+                                .await;
                             // 二次检查：上面 miss 与 pending 写入之间存在 await
                             // 窗口，句柄可能恰好在此期间落位（且对方闭包的
                             // pending 检查已经跑完拿了个空）——此时 pending 将
@@ -12704,9 +12917,14 @@ impl DownloadManager {
         // 删除前读取登记表。
         if delete_files
             && let Ok(Some(t)) = self.db.load_task_by_id(task_id).await
-            && let Err(error) =
-                delete_task_artifact_files(&self.db, task_id, &t.save_dir, &[task_id.to_string()])
-                    .await
+            && let Err(error) = delete_task_artifact_files(
+                &self.db,
+                task_id,
+                &t.save_dir,
+                &[task_id.to_string()],
+                is_bt_url(&t.url),
+            )
+            .await
         {
             crate::logger::report_error("download-manager", "delete task artifacts", &error);
             if cleanup_error.is_none() {
@@ -13006,7 +13224,8 @@ impl DownloadManager {
             // 最终产物认领判定（详见 task_owns_final_file）：未完成任务的 file_name
             // 可能是未 dedup 的原始名，指向早前同名任务留下的成品。
             let claimed = delete_files && claimed_by_other(&task.save_dir, &task.file_name);
-            let artifacts = if delete_files {
+            #[allow(unused_mut)] // Extended with sidecar outputs only with the BT feature.
+            let mut artifacts: Vec<PathBuf> = if delete_files {
                 facts
                     .artifacts
                     .get(&task.task_id)
@@ -13020,6 +13239,28 @@ impl DownloadManager {
             } else {
                 Vec::new()
             };
+            #[cfg(feature = "bt")]
+            if delete_files && !adopted && is_bt_url(&task.url) {
+                match bt_completed_paths(&self.app_data_dir, &task.task_id, &task.save_dir).await {
+                    Ok(paths) => artifacts.extend(paths.into_iter().filter(|path| {
+                        path.strip_prefix(&task.save_dir)
+                            .ok()
+                            .and_then(|relative| relative.components().next())
+                            .is_some_and(|top| {
+                                !claimed_by_other(
+                                    &task.save_dir,
+                                    &top.as_os_str().to_string_lossy(),
+                                )
+                            })
+                    })),
+                    Err(error) => {
+                        return Err(crate::db::DbError::InvalidConfig(format!(
+                            "completed BT ownership for {}: {error}",
+                            task.task_id
+                        )));
+                    }
+                }
+            }
             let files = DeleteFiles {
                 is_bt: is_bt_url(&task.url),
                 delete_files,
@@ -13251,26 +13492,26 @@ impl DownloadManager {
         let stopped_message = task.seeding_message.clone();
         let task_id = task.task_id.clone();
 
-        // 数据源重建：.torrent 任务从 DB 取回种子字节，其余按 magnet 处理。
-        let source = if is_magnet(&task.url) {
-            TorrentSource::Magnet(task.url.clone())
-        } else {
-            let bytes = self
-                .db
-                .load_torrent_file_bytes(&task_id)
-                .await
-                .unwrap_or_default()
-                .unwrap_or_default();
-            if bytes.is_empty() {
-                log_info!(
-                    "[manager] reseed {}: no torrent bytes persisted, cannot re-add",
-                    task_id
-                );
-                self.emit_progress_from_db(&task_id, 3, stopped_status, &stopped_message, 0)
+        let source = match bt_downloader::cached_torrent_bytes(
+            &self.db,
+            &task_id,
+            &task.url,
+            &self.app_data_dir,
+        )
+        .await
+        {
+            Ok(Some(bytes)) => TorrentSource::TorrentFileBytes(bytes),
+            Ok(None) if is_magnet(&task.url) => TorrentSource::Magnet(task.url.clone()),
+            result => {
+                let message = match result {
+                    Err(error) => format!("cannot load torrent metadata: {error:#}"),
+                    _ => "torrent file bytes lost — cannot resume seeding".to_owned(),
+                };
+                crate::log_error!("[manager] reseed {}: {}", task_id, message);
+                self.emit_progress_from_db(&task_id, 3, stopped_status, &message, 0)
                     .await;
                 return;
             }
-            TorrentSource::TorrentFileBytes(bytes)
         };
         // 文件选择：completed 任务必然确认过；子集烘焙进 add options。
         let only_files = match self
@@ -13367,7 +13608,7 @@ impl DownloadManager {
                             task_id,
                             del_files
                         );
-                        if let Err(error) = bt.delete_task(&task_id, del_files).await {
+                        if let Err(error) = bt.delete_task_preserving_parts(&task_id, del_files).await {
                             crate::logger::report_error("download-manager", "delete reseed handle", &error);
                         }
                         return;

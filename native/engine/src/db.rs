@@ -56,9 +56,9 @@ pub struct DeletionFacts {
     pub file_owners: HashMap<(String, String), Vec<String>>,
 }
 
-/// 一条 `DELETE FROM config WHERE key IN (...)` 覆盖的任务数（每任务 5 个键，
+/// 一条 `DELETE FROM config WHERE key IN (...)` 覆盖的任务数（每任务 6 个键，
 /// 参数个数保持在 SQLite 999 上限内）。
-const CONFIG_KEY_TASKS_PER_STATEMENT: usize = 180;
+const CONFIG_KEY_TASKS_PER_STATEMENT: usize = 150;
 
 /// `$1,$2,…,$n` 占位符列表（两后端共用的编号占位符）。
 fn numbered_placeholders(n: usize) -> String {
@@ -2611,12 +2611,13 @@ impl Db {
         // 任务级 config 行(完成幂等哨兵 bt_completion_top_<id>、HLS 断点
         // hls_resume_<id>、独立音轨断点 hls_audio_resume_<id> 与分片过滤指纹
         // hls_filter_<id> / hls_audio_filter_<id>)随任务一并清理,防孤儿行累积。
-        sqlx::query("DELETE FROM config WHERE key IN ($1, $2, $3, $4, $5)")
+        sqlx::query("DELETE FROM config WHERE key IN ($1, $2, $3, $4, $5, $6)")
             .bind(format!("bt_completion_top_{id}"))
             .bind(format!("hls_resume_{id}"))
             .bind(format!("hls_audio_resume_{id}"))
             .bind(format!("hls_filter_{id}"))
             .bind(format!("hls_audio_filter_{id}"))
+            .bind(format!("bt_preserve_stage_{id}"))
             .execute(&mut *tx)
             .await?;
         // 已下载条目变为已读，而非 New：否则下一轮抓取会自动重新派发。
@@ -2665,11 +2666,11 @@ impl Db {
             }
 
             // 任务级 config 行(哨兵/HLS 视频与音轨断点/分片过滤指纹)随任务清理,
-            // 防孤儿行累积。每个任务 5 个键：再分小块，参数个数保持在 SQLite 999 上限内。
+            // 防孤儿行累积。每个任务 6 个键：再分小块，参数个数保持在 SQLite 999 上限内。
             for keys_chunk in chunk.chunks(CONFIG_KEY_TASKS_PER_STATEMENT) {
                 let sql = format!(
                     "DELETE FROM config WHERE key IN ({})",
-                    numbered_placeholders(keys_chunk.len() * 5)
+                    numbered_placeholders(keys_chunk.len() * 6)
                 );
                 let mut query = sqlx::query(AssertSqlSafe(sql));
                 for id in keys_chunk {
@@ -2678,7 +2679,8 @@ impl Db {
                         .bind(format!("hls_resume_{id}"))
                         .bind(format!("hls_audio_resume_{id}"))
                         .bind(format!("hls_filter_{id}"))
-                        .bind(format!("hls_audio_filter_{id}"));
+                        .bind(format!("hls_audio_filter_{id}"))
+                        .bind(format!("bt_preserve_stage_{id}"));
                 }
                 query.execute(&mut *tx).await?;
             }

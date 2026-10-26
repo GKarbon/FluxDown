@@ -18,6 +18,9 @@ public enum HostMethod {
     public static let systemShutdown = "system.shutdown"
     public static let daemonTaskList = "daemon.task.list"
     public static let daemonTaskGet = "daemon.task.get"
+    public static let daemonTaskBtFiles = "daemon.task.btFiles"
+    public static let daemonTaskSetBtFiles = "daemon.task.setBtFiles"
+    public static let daemonTaskCleanBtUnselected = "daemon.task.cleanBtUnselected"
     public static let daemonTaskActivity = "daemon.task.activity"
     /// 任务整个生命周期的持久化速度曲线与统计（`{taskId}` → `TaskSpeedHistory?`，`null` = 无记录）。
     public static let daemonTaskSpeedHistory = "daemon.task.speedHistory"

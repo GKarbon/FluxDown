@@ -31,6 +31,9 @@
 
 ## BT / eD2K
 
+- **磁力元数据须随任务保留，不能仅依赖 rqbit 会话缓存**：首次解析后写 `torrent_files`；读旧缓存须先核对 info-hash 再固定到 DB，恢复/重选/做种复用本地字节；session delete 会移除 `{hash}.torrent` → `bt_downloader.rs::cached_torrent_bytes` 与 Phase 3。
+- **多文件种子部分选择完成后也须保留真实根容器**：不能只把 `file_name` 改为不存在的种子名；旧 flat 产物迁移保留文件并先登记 artifact，再替换 sidecar → `bt_downloader.rs::compute_completion_layout` 与完成阶段。
+
 另见 AGENTS.md §4：BT 判定只认 `magnet:` 与 `torrent-file://`、「复制链接」读 `origin_url`、`dht.json` 撞端口排除区间。
 
 - **种子内相对路径必须过 `torrent_relative_path_is_safe`，且 Windows 规则只对 Windows 强加**：Windows 下组件内的 `:`（盘符前缀 / ADS）、控制字符、设备保留名会改写基路径或落到设备；这些在其他平台是合法文件名，不得误杀 → `native/engine/src/bt_downloader.rs::torrent_relative_path_is_safe`（含 `a:b` 非 Windows 放行断言）。

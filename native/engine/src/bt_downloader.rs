@@ -110,6 +110,48 @@ impl TorrentSource {
     }
 }
 
+/// Load immutable metadata locally, verifying a magnet's hash before pinning a legacy cache.
+pub(crate) async fn cached_torrent_bytes(
+    db: &Db,
+    task_id: &str,
+    url: &str,
+    app_data_dir: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let stored = db.load_torrent_file_bytes(task_id).await?;
+    let expected = TorrentSource::Magnet(url.to_owned()).info_hash_hex();
+    let (bytes, promote) = match stored {
+        Some(bytes) => (bytes, false),
+        None => {
+            let Some(hash) = &expected else {
+                return Ok(None);
+            };
+            let path =
+                crate::bt_partfile::persistence_dir(app_data_dir).join(format!("{hash}.torrent"));
+            match tokio::fs::read(path).await {
+                Ok(bytes) => (bytes, true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+    };
+    let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+        let parsed = librqbit::torrent_from_bytes(&bytes)?;
+        if let Some(hash) = expected {
+            anyhow::ensure!(
+                parsed.info_hash.as_string() == hash,
+                "cached torrent info hash does not match the task"
+            );
+        }
+        parsed.info.data.validate()?;
+        Ok(bytes)
+    })
+    .await??;
+    if promote {
+        db.save_torrent_file_bytes(task_id, &bytes).await?;
+    }
+    Ok(Some(bytes))
+}
+
 /// Extract the `dn=` (display name) parameter from a magnet URI, if present.
 ///
 /// The decoded value is sanitized via `crate::naming::sanitize_filename`
@@ -600,6 +642,8 @@ pub struct SharedBtSession {
     /// It is the BT analogue of the HTTP path's `reserved_temp_paths`.  The
     /// lock is only contended in the rare simultaneous-completion case.
     completion_move_lock: Mutex<()>,
+    file_change_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    file_change_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Tracks completed torrents that are kept alive for seeding.
     seeding: Arc<SeedingManager>,
     /// task_id → pause 世代号。pause / resume / delete 各自增一次；句柄入册前
@@ -961,6 +1005,8 @@ impl SharedBtSession {
             inflight_adds: AtomicUsize::new(0),
             torrent_ids: Mutex::new(HashMap::new()),
             completion_move_lock: Mutex::new(()),
+            file_change_locks: Mutex::new(HashMap::new()),
+            file_change_cancellations: Mutex::new(HashMap::new()),
             seeding: Arc::new(SeedingManager::new()),
             pause_epochs: Mutex::new(HashMap::new()),
             pending_pauses: Mutex::new(HashMap::new()),
@@ -1275,6 +1321,42 @@ impl SharedBtSession {
     }
 
     /// Get the cached torrent handle without changing its pause state.
+    pub(crate) async fn file_change_cancellation(&self, task_id: &str) -> Arc<AtomicBool> {
+        self.file_change_cancellations
+            .lock()
+            .await
+            .entry(task_id.into())
+            .or_default()
+            .clone()
+    }
+
+    pub(crate) async fn file_change_lock(&self, task_id: &str) -> Arc<Mutex<()>> {
+        self.file_change_locks
+            .lock()
+            .await
+            .entry(task_id.into())
+            .or_default()
+            .clone()
+    }
+
+    // Reopen on regular writable staging storage, retaining the completion sidecar.
+    pub(crate) async fn detach_for_file_change(&self, task_id: &str) -> Result<(), DownloadError> {
+        if let Some(handle) = self.cached_handle(task_id).await {
+            self.session
+                .delete(handle.id().into(), false)
+                .await
+                .map_err(|e| DownloadError::Other(format!("detach BT torrent: {e:#}")))?;
+            self.handles.lock().await.remove(task_id);
+            self.unregister_torrent_id(handle.id()).await;
+            self.clear_stale_fastresume(&handle.info_hash().as_string());
+        }
+        self.unregister_seeder(task_id).await;
+        self.pause_epochs.lock().await.remove(task_id);
+        self.pending_pauses.lock().await.remove(task_id);
+        self.mark_fastresume_tainted(task_id).await;
+        Ok(())
+    }
+
     pub async fn cached_handle(&self, task_id: &str) -> Option<BtHandle> {
         self.handles.lock().await.get(task_id).cloned()
     }
@@ -1462,6 +1544,29 @@ impl SharedBtSession {
         task_id: &str,
         delete_files: bool,
     ) -> Result<bool, DownloadError> {
+        self.delete_task_inner(task_id, delete_files, false).await
+    }
+
+    /// Batch cleanup retains ownership until every filesystem operation succeeds.
+    pub(crate) async fn delete_task_preserving_parts(
+        &self,
+        task_id: &str,
+        delete_files: bool,
+    ) -> Result<bool, DownloadError> {
+        self.delete_task_inner(task_id, delete_files, true).await
+    }
+
+    async fn delete_task_inner(
+        &self,
+        task_id: &str,
+        delete_files: bool,
+        preserve_parts: bool,
+    ) -> Result<bool, DownloadError> {
+        self.file_change_cancellation(task_id)
+            .await
+            .store(true, Ordering::Release);
+        let file_change_lock = self.file_change_lock(task_id).await;
+        let _file_change_guard = file_change_lock.lock().await;
         let handle = self.handles.lock().await.get(task_id).cloned();
         if let Some(ref handle) = handle {
             // librqbit removes its torrent before reporting a file/storage failure.
@@ -1492,8 +1597,12 @@ impl SharedBtSession {
         }
         self.pause_epochs.lock().await.remove(task_id);
         self.pending_pauses.lock().await.remove(task_id);
+        self.file_change_locks.lock().await.remove(task_id);
+        self.file_change_cancellations.lock().await.remove(task_id);
         self.fastresume_tainted.lock().await.remove(task_id);
-        crate::bt_partfile::remove_sidecar(&self.parts_sidecar_path(task_id));
+        if !preserve_parts {
+            crate::bt_partfile::remove_sidecar(&self.parts_sidecar_path(task_id));
+        }
         Ok(handle.is_some())
     }
 
@@ -2376,21 +2485,15 @@ struct CompletionLayout {
 ///   merge/replace children only in this mode.
 ///
 /// Layout decisions:
-/// - **All-selected multi-file torrent, or a partial multi-file selection
-///   that still contains a sub-directory** → preserve rqbit's default
+/// - **Multi-file torrent, including a partial selection** → preserve rqbit's default
 ///   `save_dir/<torrent name>/...` layout even though FluxDown downloads into
 ///   a task-scoped staging dir.  The torrent root is always the outer final
 ///   container; selected relative paths (including any sub-directories, even
 ///   when only some sibling files were selected) remain the content paths
 ///   inside it.  (#543: a flat per-basename move previously dropped every
 ///   sub-directory whenever the selection was partial.)
-/// - **Single file selected from a single-file torrent (or a multi-file
-///   torrent whose one selected file sits at the top level)** → single-file
+/// - **Single file selected from a single-file torrent** → single-file
 ///   flat move (basename only, no container, optional `custom_name` rename).
-/// - **Partial selection of multiple files that are all top-level (no
-///   sub-directory among them)** → per-file flat move; basenames are deduped
-///   against save_dir AND against in-batch siblings.  `custom_name` does not
-///   apply (no obvious "container" to rename).
 ///
 /// The reason completion is driven by selected metadata paths (and never by reading
 /// staging dir contents) is that BT pieces span file boundaries, so librqbit
@@ -2478,30 +2581,36 @@ fn compute_completion_layout(
     // torrent happens to contain an inner directory with the same name as the
     // torrent root, that inner component must remain (`Root/Root/file`).
     //
-    // #543: this must also trigger for a *partial* multi-file selection as
-    // long as at least one selected file lives under a sub-directory —
-    // otherwise the flat per-basename branch below silently drops that
-    // sub-directory structure. A partial selection whose files are all
-    // top-level keeps the flat-move behavior (no container to build).
-    let has_selected_subdir = selected_files.iter().any(|file| {
-        file.relative_path
-            .parent()
-            .is_some_and(|p| !p.as_os_str().is_empty())
-    });
-    if is_multi_file_torrent && (all_selected || has_selected_subdir) {
+    // A top-level-only subset must keep the same torrent identity after completion.
+    if is_multi_file_torrent {
         let final_top = match reuse_top {
             Some(n) if !save_dir.join(n).exists() || save_dir.join(n).is_dir() => n.to_string(),
             _ => dedup_name_in_dir(save_dir, desired_container, claimed, allow_overwrite)?,
         };
         let dst_root = save_dir.join(&final_top);
+        let mut taken_by_dir: HashMap<String, HashSet<String>> = HashMap::new();
         let moves = selected_files
             .iter()
-            .map(|file| CompletionMove {
-                src: stage_dir.join(&file.relative_path),
-                dst: dst_root.join(&file.relative_path),
-                expected_len: file.len,
+            .map(|file| {
+                let parent = file.relative_path.parent().unwrap_or_else(|| Path::new(""));
+                let dir = dst_root.join(parent);
+                let taken = taken_by_dir
+                    .entry(dir.to_string_lossy().to_lowercase())
+                    .or_default();
+                let basename = file
+                    .relative_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("download");
+                let name = dedup_name_in_dir(&dir, basename, taken, allow_overwrite)?;
+                taken.insert(name.to_lowercase());
+                Ok(CompletionMove {
+                    src: stage_dir.join(&file.relative_path),
+                    dst: dir.join(name),
+                    expected_len: file.len,
+                })
             })
-            .collect();
+            .collect::<std::io::Result<Vec<_>>>()?;
         return Ok(Some(CompletionLayout {
             moves,
             top_level_name: final_top,
@@ -2510,8 +2619,7 @@ fn compute_completion_layout(
     }
 
     // Single-file flat move: reached only when the container branch above
-    // did not fire — i.e. a genuinely single-file torrent, or a multi-file
-    // torrent whose one selected file sits at the top level (no sub-dir).
+    // did not fire — i.e. a genuinely single-file torrent.
     if selected_files.len() == 1 {
         let file = &selected_files[0];
         let rel = &file.relative_path;
@@ -2690,6 +2798,27 @@ fn move_path_with_file_replace(src: &Path, dst: &Path, replace_file: bool) -> st
 const RETRY_SLEEP_BUDGET: u32 = 8;
 /// 瞬时锁重试的单次退避间隔(对齐 staging 清理重试先例)。
 const RETRY_DELAY: Duration = Duration::from_millis(250);
+
+fn files_have_same_bytes(src: &Path, dst: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    let mut source = std::fs::File::open(src)?;
+    let mut destination = std::fs::File::open(dst)?;
+    if source.metadata()?.len() != destination.metadata()?.len() {
+        return Ok(false);
+    }
+    let mut a = [0u8; 64 * 1024];
+    let mut b = [0u8; 64 * 1024];
+    loop {
+        let len = source.read(&mut a)?;
+        if len == 0 {
+            return Ok(true);
+        }
+        destination.read_exact(b.get_mut(..len).ok_or(std::io::ErrorKind::InvalidData)?)?;
+        if a.get(..len) != b.get(..len) {
+            return Ok(false);
+        }
+    }
+}
 
 /// 移动单个文件:rename → 对 ERROR_SHARING_VIOLATION(32)/
 /// ERROR_LOCK_VIOLATION(33) 在预算内退避重试(第三方独占句柄如 AV 扫描,
@@ -4274,6 +4403,14 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     // Phase 3: Metadata resolved — extract name & total size, start tracking
     // -----------------------------------------------------------------------
 
+    // Session deletion also removes rqbit's metadata cache; the task owns its durable copy.
+    if db.load_torrent_file_bytes(&task_id).await?.is_none() {
+        let bytes = handle
+            .with_metadata(|meta| meta.torrent_bytes.clone())
+            .map_err(|error| DownloadError::Other(format!("BT metadata unavailable: {error:#}")))?;
+        db.save_torrent_file_bytes(&task_id, &bytes).await?;
+    }
+
     let stats = handle.stats();
     let total_bytes = stats.total_bytes as i64;
     let resolved_name = handle.name().unwrap_or_else(|| {
@@ -4535,7 +4672,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     //     the dialog reappears on next resume (user can pick again).
     if !had_existing_handle && !skip_file_selection && selected_indices.first().copied() != Some(-1)
     {
-        let is_all = selected_indices.len() >= file_count;
+        // The initial dialog still uses an empty answer as its all-files fallback.
+        let is_all = selected_indices.is_empty() || selected_indices.len() >= file_count;
         let indices_to_save: &[i32] = if is_all { &[] } else { &selected_indices };
         if let Err(error) = db
             .save_bt_selected_files(&task_id, indices_to_save, is_all)
@@ -4844,7 +4982,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let mut last_progress_log: Option<Instant> = None;
     let mut last_logged_status: i32 = -1;
 
+    let file_change_lock = shared_bt.file_change_lock(&task_id).await;
     loop {
+        let file_change_guard = file_change_lock.lock().await;
         // Check cancellation — the manager layer (pause_task / cancel_task)
         // is responsible for calling session.pause() on the torrent handle,
         // so we only need to exit the loop here.  This avoids a double-pause
@@ -5035,6 +5175,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     .await?
                     .map(|v| v == "overwrite")
                     .unwrap_or(false);
+                let mut retained_destinations = HashSet::new();
+                let mut retained_artifacts = HashSet::new();
                 let planned_completion = {
                     // Serialize dedup-name + sentinel declaration against other
                     // BT task completions sharing this session's save_dir. The
@@ -5085,7 +5227,68 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     })?;
                     match layout {
                         None => None,
-                        Some(layout) => {
+                        Some(mut layout) => {
+                            if let Some(previous) = crate::bt_partfile::load_sidecar_layout(
+                                &shared_bt.parts_sidecar_path(&task_id),
+                                &save_path,
+                            )
+                            .map_err(DownloadError::Other)?
+                            {
+                                if !previous.info_hash().is_empty()
+                                    && previous.info_hash() != handle.info_hash().as_string()
+                                {
+                                    return Err(DownloadError::Other(
+                                        "completion sidecar belongs to another torrent".into(),
+                                    ));
+                                }
+                                for id in 0..file_count {
+                                    if let Some(path) = previous.selected_path(id)
+                                        && let Ok(relative) = path.strip_prefix(&save_path)
+                                        && let Some(top) = relative.components().next()
+                                    {
+                                        retained_artifacts
+                                            .insert(top.as_os_str().to_string_lossy().into_owned());
+                                    }
+                                }
+                                let completion_root = save_path.join(&layout.top_level_name);
+                                let task_owned_container = layout.task_owned_container;
+                                handle
+                                    .with_metadata(|meta| {
+                                        for movement in &mut layout.moves {
+                                            if let Some(index) =
+                                                meta.file_infos.iter().position(|file| {
+                                                    stage_dir.join(&file.relative_filename)
+                                                        == movement.src
+                                                })
+                                                && let Some(path) = previous.selected_path(index)
+                                                && (!task_owned_container
+                                                    || (path != completion_root.as_path()
+                                                        && path.starts_with(&completion_root)))
+                                            {
+                                                movement.dst = path.to_path_buf();
+                                                retained_destinations.insert(path.to_path_buf());
+                                            }
+                                        }
+                                    })
+                                    .map_err(|e| {
+                                        DownloadError::Other(format!(
+                                            "BT completion metadata: {e:#}"
+                                        ))
+                                    })?;
+                            }
+                            // Keep legacy flat outputs owned before replacing their sidecar mappings.
+                            for name in &retained_artifacts {
+                                db.add_task_artifact(&task_id, name).await?;
+                            }
+                            if !layout.task_owned_container
+                                && let Some(name) = layout
+                                    .moves
+                                    .first()
+                                    .and_then(|m| m.dst.file_name())
+                                    .and_then(|n| n.to_str())
+                            {
+                                layout.top_level_name = name.to_owned();
+                            }
                             if reuse_top.as_deref() != Some(layout.top_level_name.as_str()) {
                                 db.set_config(&sentinel_key, &layout.top_level_name).await?;
                             }
@@ -5197,7 +5400,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                         preview,
                                         verify_started.elapsed().as_secs_f64()
                                     );
-                                    shared_bt.delete_task(&task_id, false).await?;
+                                    shared_bt.detach_for_file_change(&task_id).await?;
                                     let msg = format!(
                                         "BT piece verification failed: {} bad piece(s) — data will be re-checked and re-downloaded",
                                         outcome.bad.len()
@@ -5279,17 +5482,32 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                     )
                                 });
                                 if let Ok((piece_length, total_length, files)) = files_meta {
+                                    let mut destinations: Vec<(usize, PathBuf)> = selected_ids
+                                        .iter()
+                                        .copied()
+                                        .zip(layout.moves.iter().map(|m| m.dst.clone()))
+                                        .collect();
+                                    if let Some(previous) = crate::bt_partfile::load_sidecar_layout(
+                                        &shared_bt.parts_sidecar_path(&task_id),
+                                        &save_path,
+                                    )
+                                    .map_err(DownloadError::Other)?
+                                    {
+                                        for id in 0..files.len() {
+                                            if !selected_ids.contains(&id)
+                                                && let Some(path) = previous.selected_path(id)
+                                            {
+                                                destinations.push((id, path.to_path_buf()));
+                                            }
+                                        }
+                                    }
                                     let req = crate::bt_partfile::SidecarWriteRequest {
                                         sidecar_path: shared_bt.parts_sidecar_path(&task_id),
                                         info_hash_hex: handle.info_hash().as_string(),
                                         piece_length,
                                         total_length,
                                         files,
-                                        selected: selected_ids
-                                            .iter()
-                                            .copied()
-                                            .zip(layout.moves.iter().map(|m| m.dst.clone()))
-                                            .collect(),
+                                        selected: destinations,
                                         save_dir: save_path.clone(),
                                         stage_dir: stage_dir.clone(),
                                     };
@@ -5364,7 +5582,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                             // create_new 原子占名让路。删除失败不中止——对应 move
                             // 会照旧 AlreadyExists 失败,走既有 ERROR+重试路径。
                             for dst in &overwrite_dsts {
-                                if !dst.is_file() {
+                                if retained_destinations.contains(dst) || !dst.is_file() {
                                     continue;
                                 }
                                 match std::fs::remove_file(dst) {
@@ -5382,6 +5600,19 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                                 }
                             }
                             for item in &moves {
+                                if retained_destinations.contains(&item.dst) && item.src.exists() {
+                                    match files_have_same_bytes(&item.src, &item.dst) {
+                                        Ok(true) => {
+                                            succeeded += 1;
+                                            if let Err(error) = std::fs::remove_file(&item.src) {
+                                                log_warn!("[BT] verified staging copy cleanup failed: {error:#}");
+                                            }
+                                        },
+                                        Ok(false) => log_warn!("[BT] retained output changed; preserving both '{}' and '{}'", item.src.display(), item.dst.display()),
+                                        Err(error) => log_warn!("[BT] retained output verification failed: {error:#}"),
+                                    }
+                                    continue;
+                                }
                                 let dst_verified = verified_existing_dsts.contains(&item.dst);
                                 match move_completion_item(
                                     &item.src,
@@ -5670,7 +5901,14 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // moved out.  If any move failed, leaving the staging dir intact
             // lets the user (or `rescue_stranded_staging_files` on next start)
             // recover the data manually.
-            if all_moves_succeeded && stage_dir_for_cleanup.exists() {
+            let preserve_stage = db
+                .get_config(&format!("bt_preserve_stage_{task_id}"))
+                .await?
+                .is_some();
+            if all_moves_succeeded
+                && (!preserve_stage || all_selected)
+                && stage_dir_for_cleanup.exists()
+            {
                 let mut removed = false;
                 for attempt in 0u8..4 {
                     if attempt > 0 {
@@ -5846,6 +6084,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             last_db_save = Instant::now();
         }
 
+        drop(file_change_guard);
         // Poll interval — aligned with the progress reporting interval (500ms)
         // to avoid wasted cycles.  Cancel detection latency of 500ms is
         // acceptable since the manager layer handles session.pause() directly.
@@ -6289,6 +6528,8 @@ mod tests {
                 inflight_adds: AtomicUsize::new(0),
                 torrent_ids: Mutex::new(HashMap::new()),
                 completion_move_lock: Mutex::new(()),
+                file_change_locks: Mutex::new(HashMap::new()),
+                file_change_cancellations: Mutex::new(HashMap::new()),
                 seeding: Arc::new(SeedingManager::new()),
                 pause_epochs: Mutex::new(HashMap::new()),
                 pending_pauses: Mutex::new(HashMap::new()),
@@ -6360,6 +6601,142 @@ mod tests {
                 },
                 progress_rx,
             )
+        }
+
+        #[test]
+        fn corrupt_completion_exits_without_reentering_the_file_change_lock() {
+            let root = super::unique_test_dir("file_change_bad_piece");
+            let save = root.join("save");
+            std::fs::create_dir_all(&save).unwrap();
+            let shared = local_session(&root);
+            shared.runtime_handle.block_on(async {
+                let db = Db::open(&root).await.unwrap();
+                db.insert_task(
+                    "selection-task",
+                    "bt://fixture",
+                    "fixture",
+                    &save.to_string_lossy(),
+                    STATUS_DOWNLOADING,
+                    0,
+                    "",
+                    "",
+                    "",
+                    0,
+                )
+                .await
+                .unwrap();
+                db.save_bt_selected_files("selection-task", &[], true)
+                    .await
+                    .unwrap();
+                let torrent = local_torrent(&root, "verified-source", 2, 16_384).await;
+                let stage = bt_stage_dir(&save.to_string_lossy(), "selection-task");
+                std::fs::create_dir_all(&stage).unwrap();
+                for index in 0..2 {
+                    std::fs::copy(
+                        root.join("verified-source")
+                            .join(format!("file-{index}.bin")),
+                        stage.join(format!("file-{index}.bin")),
+                    )
+                    .unwrap();
+                }
+                let mut opts = build_add_torrent_options(
+                    &BtSelectionStrategy::All,
+                    stage.to_string_lossy().into_owned(),
+                    0,
+                );
+                opts.paused = true;
+                let added = shared
+                    .session
+                    .add_torrent(AddTorrent::from_bytes(torrent.clone()), Some(opts))
+                    .await
+                    .unwrap();
+                let handle = match added {
+                    AddTorrentResponse::Added(_, handle) => handle,
+                    _ => panic!("fixture handle"),
+                };
+                handle.wait_until_initialized().await.unwrap();
+                assert!(handle.stats().finished);
+                shared.store_handle("selection-task", handle.clone()).await;
+                let (piece_length, total_length, files) = handle
+                    .with_metadata(|meta| {
+                        (
+                            meta.lengths().default_piece_length(),
+                            meta.lengths().total_length(),
+                            meta.file_infos
+                                .iter()
+                                .map(|f| crate::bt_partfile::PartsFileMeta {
+                                    relative_path: f.relative_filename.clone(),
+                                    len: f.len,
+                                    offset_in_torrent: f.offset_in_torrent,
+                                    piece_range: f.piece_range.clone(),
+                                    padding: f.attrs.padding,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap();
+                let selected = files
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| {
+                        let final_path = save.join(format!("retained-{index}.bin"));
+                        std::fs::copy(stage.join(&file.relative_path), &final_path).unwrap();
+                        (index, final_path)
+                    })
+                    .collect();
+                crate::bt_partfile::write_sidecar(&crate::bt_partfile::SidecarWriteRequest {
+                    sidecar_path: shared.parts_sidecar_path("selection-task"),
+                    info_hash_hex: handle.info_hash().as_string(),
+                    piece_length,
+                    total_length,
+                    files,
+                    selected,
+                    save_dir: save.clone(),
+                    stage_dir: stage.clone(),
+                })
+                .unwrap();
+                let retained_before = std::fs::read(save.join("retained-0.bin")).unwrap();
+                shared.mark_fastresume_tainted("selection-task").await;
+                std::fs::write(stage.join("file-0.bin"), vec![0u8; 16_384]).unwrap();
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let (mut params, mut progress) = inner_params(
+                    &shared,
+                    &db,
+                    &save,
+                    &torrent,
+                    &cancelled,
+                    Arc::new(crate::NoopSelection),
+                );
+                params.existing_handle = Some(handle);
+                let drain = tokio::spawn(async move { while progress.recv().await.is_some() {} });
+                let result =
+                    tokio::time::timeout(Duration::from_secs(5), bt_download_inner(params))
+                        .await
+                        .expect("bad piece cleanup must not deadlock");
+                assert!(result.is_err());
+                assert!(shared.cached_handle("selection-task").await.is_none());
+                assert_eq!(
+                    db.load_task_by_id("selection-task")
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    4
+                );
+                assert!(stage.join("file-0.bin").exists());
+                assert!(
+                    shared.parts_sidecar_path("selection-task").exists(),
+                    "bad new pieces must not discard existing completed-path ownership"
+                );
+                assert_eq!(
+                    std::fs::read(save.join("retained-0.bin")).unwrap(),
+                    retained_before
+                );
+                drain.abort();
+                shared.session.stop().await;
+            });
+            drop(shared);
+            std::fs::remove_dir_all(root).unwrap();
         }
 
         // Keep rejection and the real resume-cache lookup in the companion's live
@@ -6748,7 +7125,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // compute_completion_layout — dedup must not stack underscores (F038).
+    // compute_completion_layout — root identity and collision safety.
     // -------------------------------------------------------------------------
 
     #[test]
@@ -6756,12 +7133,7 @@ mod tests {
         // Two top-level selected files whose basenames only differ by case
         // collide (case-insensitive filesystems / Windows) once folded to
         // lowercase, and must be deduped as "File.txt" + "file (1).txt",
-        // not "_file.txt". (Previously this test used two same-basename
-        // files in different sub-dirs to force the collision, but #543 made
-        // a partial multi-file selection containing a sub-directory take the
-        // container branch instead, where the sub-dirs no longer collide —
-        // so the case-fold collision below is used to keep exercising this
-        // in-batch numeric-suffix dedup path.)
+        // not "_file.txt", while keeping the torrent's root container.
         let save = unique_test_dir("dedup_numeric_suffix");
         let stage = save.join(".stage");
         std::fs::create_dir_all(&stage)
@@ -6788,11 +7160,16 @@ mod tests {
             crate::log_warn!("[BT tests] fixture cleanup failed: {}", error);
         }
 
-        let moves = match layout {
-            Some(layout) => layout.moves,
+        let layout = match layout {
+            Some(layout) => layout,
             None => panic!("layout should be Some"),
         };
+        assert_eq!(layout.top_level_name, "Torrent");
+        assert!(layout.task_owned_container);
+        let moves = layout.moves;
         assert_eq!(moves.len(), 2);
+        assert_eq!(moves[0].dst.parent(), Some(save.join("Torrent").as_path()));
+        assert_eq!(moves[1].dst.parent(), Some(save.join("Torrent").as_path()));
         let dst0 = moves[0]
             .dst
             .file_name()
@@ -6807,6 +7184,58 @@ mod tests {
         assert_eq!(dst1, "file (1).txt");
         // No underscore-prefixed name should ever be produced.
         assert!(!dst1.starts_with('_'), "must not stack underscore prefixes");
+    }
+
+    #[test]
+    fn completion_layout_partial_top_level_file_keeps_root_and_legacy_output() {
+        let save = unique_test_dir("partial_top_level_root");
+        let stage = save.join(".stage");
+        std::fs::create_dir_all(&stage).expect("create fixture");
+        std::fs::write(save.join("movie.mp4"), b"legacy completed bytes")
+            .expect("legacy flat output");
+        std::fs::write(stage.join("movie.mp4"), b"legacy completed bytes")
+            .expect("restored staging copy");
+        let selected = completion_files_with_len(&[("movie.mp4", 22)]);
+        let claimed = HashSet::from(["pack".to_string()]);
+        let layout = super::compute_completion_layout(super::CompletionLayoutInput {
+            save_dir: &save,
+            stage_dir: &stage,
+            selected_files: &selected,
+            all_selected: false,
+            is_multi_file_torrent: true,
+            custom_name: "",
+            torrent_root_name: "Pack",
+            reuse_top: None,
+            allow_overwrite: false,
+            claimed: &claimed,
+        })
+        .expect("read completion destination")
+        .expect("selected file layout");
+        assert_eq!(layout.top_level_name, "Pack (1)");
+        assert!(layout.task_owned_container);
+        assert_eq!(layout.moves.len(), 1);
+        let item = &layout.moves[0];
+        assert_eq!(item.dst, save.join("Pack (1)").join("movie.mp4"));
+        assert_eq!(
+            super::move_completion_item(
+                &item.src,
+                &item.dst,
+                item.expected_len,
+                false,
+                layout.task_owned_container,
+                false,
+            )
+            .expect("complete under torrent root"),
+            super::CompletionMoveOutcome::Moved,
+        );
+        assert!(save.join(&layout.top_level_name).is_dir());
+        assert_eq!(std::fs::read(&item.dst).unwrap(), b"legacy completed bytes");
+        assert_eq!(
+            std::fs::read(save.join("movie.mp4")).unwrap(),
+            b"legacy completed bytes",
+            "old complete output must not be deleted when adopting a root container",
+        );
+        std::fs::remove_dir_all(&save).expect("remove fixture");
     }
 
     /// #543: a *partial* multi-file selection that still contains a

@@ -19,3 +19,5 @@ export * from './task';
 export * from './table';
 export * from './webhook';
 export * from './ws';
+
+export * from './btFiles';
