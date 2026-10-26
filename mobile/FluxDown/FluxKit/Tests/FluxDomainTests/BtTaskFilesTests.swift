@@ -40,6 +40,23 @@ struct BtTaskFilesTests {
         #expect(editor.snapshot?.taskId == "t")
     }
 
+    @Test func bulkSelectionIsADraftAndSurvivesProgressPolling() {
+        var editor = BtTaskFilesSelection(taskId: "t")
+        editor.setAllSelected(true)
+        #expect(editor.selected.isEmpty && !editor.canApply)
+        editor.receive(fixture())
+        editor.setAllSelected(true)
+        #expect(editor.selected == [0, 2] && editor.canApply)
+        #expect(editor.snapshot?.files.filter(\.selected).map(\.index) == [0])
+        editor.receive(fixture())
+        #expect(editor.selected == [0, 2])
+        editor.setAllSelected(false)
+        editor.receive(fixture())
+        #expect(editor.selected.isEmpty && editor.changed && !editor.canApply)
+        editor.cancel()
+        #expect(editor.selected == [0] && !editor.changed)
+    }
+
     @Test func emptyDraftCannotApply() {
         var editor = BtTaskFilesSelection(taskId: "t")
         #expect(!editor.canApply)

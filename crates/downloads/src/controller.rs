@@ -97,6 +97,17 @@ impl SeedLimits {
 pub enum DownloadsCommand {
     /// 分页读取 daemon 持久活动历史。
     TaskActivity(TaskActivityQuery),
+    /// Read existing BT files and verified progress through the connected daemon.
+    TaskBtFiles {
+        task_id: String,
+    },
+    /// Apply an exact nonempty BT file selection, retaining existing file data.
+    SetBtFiles(fluxdown_protocol::SetBtTaskFilesParams),
+    /// Explicitly clean downloaded data belonging only to unselected BT files.
+    CleanBtUnselected {
+        task_id: String,
+        indices: Vec<i32>,
+    },
     /// 读取 daemon 持久化的任务全生命周期速度曲线与统计（`daemon.task.speedHistory`）。
     TaskSpeedHistory(fluxdown_protocol::TaskSpeedHistoryQuery),
     Create(Box<fluxdown_protocol::DaemonCreateTaskParams>),
@@ -289,6 +300,8 @@ pub enum DownloadsResult {
     Unit,
     Value(serde_json::Value),
     TaskActivity(TaskActivityPage),
+    /// Existing BT metadata, current selection, and nullable verified file progress.
+    TaskBtFiles(fluxdown_protocol::BtTaskFilesDto),
     /// 无记录（从未下载或已重新下载重置）时为 `None`。
     TaskSpeedHistory(Option<fluxdown_protocol::TaskSpeedHistoryDto>),
     Preview(fluxdown_protocol::ResolvePreviewResponse),

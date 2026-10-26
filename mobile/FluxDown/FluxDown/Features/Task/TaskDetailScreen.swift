@@ -68,7 +68,7 @@ private struct TaskDetailLoader: View {
 private nonisolated enum DetailPage: Hashable, CaseIterable {
     case general, speed
     #if FULL_FLAVOR
-    case seeding
+    case files, seeding
     #endif
     case log, advanced
 
@@ -77,6 +77,7 @@ private nonisolated enum DetailPage: Hashable, CaseIterable {
         case .general: L("detailTabGeneral")
         case .speed: L("detailTabSpeed")
         #if FULL_FLAVOR
+        case .files: L("btTaskFilesTab")
         case .seeding: L("tabSeeding")
         #endif
         case .log: L("detailTabLog")
@@ -102,10 +103,10 @@ private struct TaskDetailPage: View {
 
     private var task: DownloadTask { model.task }
 
-    /// 页签：「做种」仅 BT（store 不含做种）；「日志」所有协议都有。
+    /// 页签：「文件」与「做种」仅 BT（store 均不含）；「日志」所有协议都有。
     private var pages: [DetailPage] {
         #if FULL_FLAVOR
-        if task.protocol == .bt { return [.general, .speed, .seeding, .log, .advanced] }
+        if task.protocol == .bt { return [.general, .speed, .files, .seeding, .log, .advanced] }
         #endif
         return [.general, .speed, .log, .advanced]
     }
@@ -130,6 +131,9 @@ private struct TaskDetailPage: View {
             case .general: TaskDetailGeneralPage(model: model)
             case .speed: TaskDetailSpeedPage(model: model)
             #if FULL_FLAVOR
+            case .files:
+                TaskDetailFilesPage(task: task)
+                    .id(ObjectIdentifier(container.session))
             case .seeding: TaskDetailSeedingPage(model: model)
             #endif
             case .log: TaskActivityLogPage(taskId: task.taskId)
@@ -216,9 +220,9 @@ private struct TaskDetailPage: View {
             ForEach(pages, id: \.self) { Text($0.title).tag($0) }
         }
         .labelsHidden()
-        // 4 项短标签适合系统分段；≥ AX1 放不下，改菜单式（01-foundations §4.4）。
+        // 六个 BT 页签或辅助功能字号改用菜单，避免紧凑宽度下挤压标签。
         Group {
-            if typeSize.isAccessibilitySize {
+            if typeSize.isAccessibilitySize || pages.count > 5 {
                 picker.pickerStyle(.menu)
             } else {
                 picker.pickerStyle(.segmented)

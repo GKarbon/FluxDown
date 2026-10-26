@@ -246,7 +246,7 @@ private struct BtSelectionView: View {
                     FluxHaptic.selection.play()
                 } label: {
                     HStack(spacing: 10) {
-                        checkbox(state)
+                        BtSelectionCheckmark(state: state)
                         Image(systemName: FluxSymbol.folder).foregroundStyle(.secondary)
                         Text(folder.name).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 8)
@@ -271,7 +271,7 @@ private struct BtSelectionView: View {
                 FluxHaptic.selection.play()
             } label: {
                 HStack(spacing: 10) {
-                    checkbox(on ? .on : .off)
+                    BtSelectionCheckmark(state: on ? .on : .off)
                     Image(systemName: FileKind.from(fileName: name).symbolName).foregroundStyle(.secondary)
                     Text(name).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 8)
@@ -291,18 +291,6 @@ private struct BtSelectionView: View {
         }
     }
 
-    private func checkbox(_ state: BtCheckState) -> some View {
-        Image(systemName: {
-            switch state {
-            case .off: "circle"
-            case .on: "checkmark.circle.fill"
-            case .mixed: "minus.circle.fill"
-            }
-        }())
-        .font(.title3)
-        .foregroundStyle(state == .off ? Color.secondary : Color.accentColor)
-        .accessibilityHidden(true)
-    }
 }
 #endif
 

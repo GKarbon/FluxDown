@@ -88,6 +88,11 @@ public struct BtTaskFilesSelection: Sendable, Equatable {
         draft = next
     }
 
+    public mutating func setAllSelected(_ selected: Bool) {
+        guard let snapshot, snapshot.metadataReady else { return }
+        draft = selected ? Set(snapshot.files.map(\.index)) : []
+    }
+
     public mutating func cancel() { draft = nil }
 
     /// Called only after the mutation was acknowledged; a subsequent read may still fail independently.

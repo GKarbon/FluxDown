@@ -9,6 +9,7 @@ import { AdvancedTab } from './AdvancedTab'
 import { GeneralTab } from './GeneralTab'
 import { LogTab } from './LogTab'
 import { SeedingTab } from './SeedingTab'
+import { FilesTab } from './FilesTab'
 import { SpeedTab } from './SpeedTab'
 import { GroupOverview } from './GroupOverview'
 import { useSpeedHistory } from './useSpeedHistory'
@@ -25,13 +26,14 @@ function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | '
   const isBt = view.protocol === 'bt'
   const pluginTabs = usePluginDetailTabs()
   const pluginTab = pluginTabs.find((item) => item.value === tab)
-  // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有；传输诊断仅FluxMesh接收任务有。
+  // 插件 tab 随插件卸载 / 禁用消失时回到常规；files / seeding 仅 BT 任务有；传输诊断仅FluxMesh接收任务有。
   const active: DetailTab =
-    (tab === 'seeding' && !isBt) || (tab === 'shareDiag' && !hasShareDiagnostics) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
+    ((tab === 'seeding' || tab === 'files') && !isBt) || (tab === 'shareDiag' && !hasShareDiagnostics) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
   const speedHistory = useSpeedHistory(view.taskId, view.state === 'downloading', active === 'speed')
   const items = [
     { value: 'general' as const, label: t('detailTabGeneral') },
     { value: 'speed' as const, label: t('detailTabSpeed') },
+    ...(isBt ? [{ value: 'files' as const, label: t('btTaskFilesTab') }] : []),
     ...(isBt ? [{ value: 'seeding' as const, label: t('tabSeeding') }] : []),
     ...(hasShareDiagnostics ? [{ value: 'shareDiag' as const, label: t('detailTabShareDiagnostics') }] : []),
     { value: 'log' as const, label: t('detailTabLog') },
@@ -47,6 +49,7 @@ function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | '
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {active === 'general' ? <GeneralTab view={view} /> : null}
         {active === 'speed' ? <SpeedTab view={view} history={speedHistory} /> : null}
+        {active === 'files' ? <FilesTab key={view.taskId} view={view} /> : null}
         {active === 'seeding' ? <SeedingTab view={view} /> : null}
         {active === 'shareDiag' ? <TransferDiagnosticsTab taskId={view.taskId} taskState={view.state} /> : null}
         {active === 'log' ? <LogTab taskId={view.taskId} /> : null}

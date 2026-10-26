@@ -5,6 +5,27 @@ import SwiftUI
 /// 答复成功后关闭 Sheet 的回调（在主 actor 上执行，可跨 Task 传递）。
 typealias SelectionClose = @MainActor @Sendable () -> Void
 
+#if FULL_FLAVOR
+/// Shared BT selection mark for new-task choices and existing-task file details.
+struct BtSelectionCheckmark: View {
+    let state: BtCheckState
+
+    var body: some View {
+        Image(systemName: {
+            switch state {
+            case .off: "circle"
+            case .on: "checkmark.circle.fill"
+            case .mixed: "minus.circle.fill"
+            }
+        }())
+        .font(.title3)
+        .foregroundStyle(state == .off ? Color.secondary : Color.accentColor)
+        .accessibilityHidden(true)
+    }
+}
+
+#endif
+
 // MARK: - 答复
 
 /// 经 `HostSession.resolveSelection` 答复；去重、只读拦截与错误 toast 集中在这里。

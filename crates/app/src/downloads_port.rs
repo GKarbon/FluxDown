@@ -263,6 +263,22 @@ impl AgentDownloadsPort {
                         .await?;
                     return Ok(DownloadsResult::TaskActivity(page));
                 }
+                DownloadsCommand::TaskBtFiles { task_id } => {
+                    let files = client
+                        .call(
+                            method::DAEMON_TASK_BT_FILES,
+                            Some(json!({ "taskId": task_id })),
+                        )
+                        .await?;
+                    return Ok(DownloadsResult::TaskBtFiles(files));
+                }
+                DownloadsCommand::SetBtFiles(params) => {
+                    (method::DAEMON_TASK_SET_BT_FILES, serialize(params)?)
+                }
+                DownloadsCommand::CleanBtUnselected { task_id, indices } => (
+                    method::DAEMON_TASK_CLEAN_BT_UNSELECTED,
+                    json!({ "taskId": task_id, "indices": indices }),
+                ),
                 DownloadsCommand::TaskSpeedHistory(query) => {
                     let history = client
                         .call(method::DAEMON_TASK_SPEED_HISTORY, Some(query))

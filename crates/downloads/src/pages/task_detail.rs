@@ -6,6 +6,8 @@
 //! `pub fn`）订阅，自带一个私有 [`DownloadsController`] 维护任务列表。
 #[path = "task_detail_activity.rs"]
 mod activity;
+#[path = "task_detail_files.rs"]
+mod files;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -97,6 +99,7 @@ pub enum DetailMode {
 enum DetailTab {
     General,
     Speed,
+    Files,
     /// FluxMesh接收任务的传输诊断（内容由宿主工厂提供）。
     ShareDiagnostics,
     Seeding,
@@ -106,11 +109,12 @@ enum DetailTab {
     Plugin(u16),
 }
 
-/// 可见 tab 顺序：内置 tab（做种仅 BT 任务、传输诊断仅FluxMesh接收任务）后接全部插件 tab。
+/// 可见 tab 顺序：内置 tab（文件与做种仅 BT 任务、传输诊断仅FluxMesh接收任务）后接全部插件 tab。
 fn visible_tabs(is_bt: bool, share_diagnostics: bool, plugin_tabs: usize) -> Vec<DetailTab> {
     let builtin = [
         DetailTab::General,
         DetailTab::Speed,
+        DetailTab::Files,
         DetailTab::ShareDiagnostics,
         DetailTab::Seeding,
         DetailTab::Log,
@@ -118,7 +122,7 @@ fn visible_tabs(is_bt: bool, share_diagnostics: bool, plugin_tabs: usize) -> Vec
     ]
     .into_iter()
     .filter(move |tab| match tab {
-        DetailTab::Seeding => is_bt,
+        DetailTab::Seeding | DetailTab::Files => is_bt,
         DetailTab::ShareDiagnostics => share_diagnostics,
         _ => true,
     });
@@ -159,10 +163,11 @@ pub struct TaskDetailView {
     speed_fetching: bool,
     /// 请求在途时又出现刷新需求：返回后补拉一次。
     speed_refetch: bool,
-    speed_generation: u64,
+    task_generation: u64,
     speed_was_downloading: bool,
     speed_last_fetch: Option<Instant>,
     activity: ActivityFeed,
+    files: files::TaskFilesState,
     runtime: Option<TaskRuntimeDto>,
     activity_stale: bool,
     activity_online: bool,
@@ -276,6 +281,7 @@ impl TaskDetailView {
 
         let this = Self {
             activity: ActivityFeed::new(task_id.clone()),
+            files: files::TaskFilesState::default(),
             runtime: None,
             activity_stale: false,
             activity_online: true,
@@ -297,7 +303,7 @@ impl TaskDetailView {
             speed_stats: None,
             speed_fetching: false,
             speed_refetch: false,
-            speed_generation: 0,
+            task_generation: 0,
             speed_was_downloading: false,
             speed_last_fetch: None,
             closed: false,
@@ -338,6 +344,7 @@ impl TaskDetailView {
                     .update(cx, |this, cx| {
                         this.sample_speed(cx);
                         this.tick_speed_history(cx);
+                        this.tick_files(cx);
                     })
                     .is_err()
                 {
@@ -359,12 +366,13 @@ impl TaskDetailView {
         self.share_views.clear();
         self.dto = None;
         self.activity.switch_task(self.task_id.clone());
+        self.files = files::TaskFilesState::default();
         self.activity_stale = false;
         self.speed_history.clear();
         self.speed_stats = None;
         self.speed_fetching = false;
         self.speed_refetch = false;
-        self.speed_generation = self.speed_generation.wrapping_add(1);
+        self.task_generation = self.task_generation.wrapping_add(1);
         self.speed_was_downloading = false;
         self.speed_last_fetch = None;
         self.runtime = None;
@@ -662,7 +670,7 @@ impl TaskDetailView {
         self.speed_fetching = true;
         self.speed_refetch = false;
         self.speed_last_fetch = Some(Instant::now());
-        let generation = self.speed_generation;
+        let generation = self.task_generation;
         let task_id = self.task_id.clone();
         let future = self
             .port
@@ -672,7 +680,7 @@ impl TaskDetailView {
         cx.spawn(async move |this, cx| {
             let result = future.await;
             let Ok(()) = this.update(cx, |this, cx| {
-                if this.speed_generation != generation {
+                if this.task_generation != generation {
                     return;
                 }
                 this.speed_fetching = false;
@@ -709,6 +717,9 @@ impl TaskDetailView {
     fn select_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            if tab == DetailTab::Files {
+                self.fetch_files(cx);
+            }
             if tab == DetailTab::Speed {
                 self.speed_was_downloading = self.task_downloading();
                 self.fetch_speed_history(cx);
@@ -1083,6 +1094,7 @@ impl TaskDetailView {
         let key = match tab {
             DetailTab::General => "detailTabGeneral",
             DetailTab::Speed => "detailTabSpeed",
+            DetailTab::Files => "btTaskFilesTab",
             DetailTab::Seeding => "tabSeeding",
             DetailTab::ShareDiagnostics => "detailTabShareDiagnostics",
             DetailTab::Log => "detailTabLog",
@@ -2395,6 +2407,7 @@ impl gpui::Render for TaskDetailView {
         let body = match self.tab {
             DetailTab::General => self.render_general(cx),
             DetailTab::Speed => self.render_speed(cx),
+            DetailTab::Files => self.render_files(cx),
             DetailTab::Seeding => self.render_seeding(cx),
             DetailTab::Log => self.render_log(cx),
             DetailTab::Advanced => self.render_advanced(cx),
@@ -2789,6 +2802,7 @@ mod tests {
             [
                 DetailTab::General,
                 DetailTab::Speed,
+                DetailTab::Files,
                 DetailTab::ShareDiagnostics,
                 DetailTab::Seeding,
                 DetailTab::Log,
