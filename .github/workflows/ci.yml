@@ -7,7 +7,7 @@ name: CI
 # workflow_dispatch = 全量运行（忽略路径过滤）：发版前在发布分支上跑一遍，release.yml 的 CI 门禁认它。
 on:
   push:
-    branches: [main]
+    branches: [main, feat/330-bt-file-details]
   pull_request:
   workflow_dispatch:
 
@@ -25,6 +25,8 @@ env:
 
 jobs:
   changes:
+    # Feature-branch pushes run only in forks; upstream keeps its existing triggers.
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || github.event.repository.fork
     name: Detect Changes
     runs-on: ubuntu-latest
     permissions:
@@ -125,6 +127,7 @@ jobs:
   # [patch] 路径、TS 跨目录引用的共享夹具等），否则只改这些文件的 PR 不会触发对应检查。
   # 每次都跑（只读源码 + `cargo metadata --no-deps --offline`，秒级）。
   ci-paths:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || github.event.repository.fork
     name: CI paths filter coverage
     runs-on: ubuntu-latest
     steps:
@@ -389,3 +392,34 @@ jobs:
           push: false
           cache-from: type=gha,scope=server-check
           cache-to: type=gha,scope=server-check,mode=max
+
+  # Additional non-publishing checks for this feature branch in a fork only.
+  windows-feature-check:
+    name: Fork Windows desktop compile
+    if: github.event_name == 'push' && github.event.repository.fork && github.ref == 'refs/heads/feat/330-bt-file-details'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: issue330-windows-check
+      - name: Check native desktop and hosts
+        run: cargo check --locked -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon -p fluxdown_nmh --features fluxdown_agent/desktop --bins
+
+  arm64-feature-check:
+    name: Fork ARM64 server context
+    if: github.event_name == 'push' && github.event.repository.fork && github.ref == 'refs/heads/feat/330-bt-file-details'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/server.Dockerfile
+          target: server-check
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha,scope=issue330-arm64-check
+          cache-to: type=gha,scope=issue330-arm64-check,mode=max
