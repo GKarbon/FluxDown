@@ -599,12 +599,6 @@ impl CloudApi {
         .await
     }
 
-    /// `DELETE /share/endpoint`：注销本设备 endpoint。
-    pub async fn share_unregister_endpoint(&self) -> Result<Value, CloudError> {
-        self.authed(Method::DELETE, "/api/v1/share/endpoint", None::<&Value>)
-            .await
-    }
-
     /// `POST /share/guest-session`（公开）：未登录发送方凭 endpoint 私钥签名换游客令牌。
     pub async fn share_guest_session<P: Serialize, R: serde::de::DeserializeOwned>(
         &self,
