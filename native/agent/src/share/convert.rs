@@ -132,9 +132,19 @@ pub(super) fn sample(sample: &core::SessionSample) -> ShareSessionSampleDto {
     }
 }
 
+pub(super) fn swarm_file(file: &core::SwarmServedFile) -> proto::ShareSwarmServedFileDto {
+    proto::ShareSwarmServedFileDto {
+        root_hash: file.root_hash.clone(),
+        file_name: None,
+        bytes: file.bytes,
+        chunks: file.chunks,
+    }
+}
+
 pub(super) fn role(role: core::SessionRole) -> proto::ShareSessionRole {
     match role {
         core::SessionRole::Sender => proto::ShareSessionRole::Sender,
         core::SessionRole::Receiver => proto::ShareSessionRole::Receiver,
+        core::SessionRole::Swarm => proto::ShareSessionRole::Swarm,
     }
 }

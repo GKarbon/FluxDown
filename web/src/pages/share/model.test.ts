@@ -36,6 +36,10 @@ import {
   shareSourceBadge,
   sortShares,
   sourceBytesRows,
+  SESSION_ROLE_KEYS,
+  servedFileLabel,
+  shortId,
+  swarmToggle,
   tierLabel,
   uploadPercent,
   uploadProgressText,
@@ -349,6 +353,28 @@ describe('path diagnostics', () => {
     expect(bytesSplit({ direct: 3, relay: 1, cdn: 0, bridge: 0 }).percent).toBe(75)
     expect(bytesSplit({ direct: 0, relay: 5, cdn: 0, bridge: 0 }).percent).toBe(0)
     expect(bytesSplit({ direct: 1, relay: 0, cdn: 2, bridge: 1 }).percent).toBe(25)
+  })
+
+  test('swarm provider session: role label, served file name or short root hash', () => {
+    expect(SESSION_ROLE_KEYS.swarm).toBe('shareNetRoleSwarm')
+    expect(SESSION_ROLE_KEYS.sender).toBe('shareNetRoleSender')
+    const root = 'ab'.repeat(32)
+    expect(servedFileLabel({ rootHash: root, fileName: '电影 2024 第一季.mkv' })).toBe('电影 2024 第一季.mkv')
+    for (const fileName of [undefined, null, '', '  \t']) {
+      expect(servedFileLabel({ rootHash: root, fileName })).toBe(`${root.slice(0, 6)}…${root.slice(-4)}`)
+    }
+    expect(shortId('peer')).toBe('peer')
+    expect(shortId('日本語のエンドポイント識別子です')).toBe('日本語のエン…別子です')
+  })
+
+  test('swarm toggle is off and disabled once an administrator locked it', () => {
+    expect(swarmToggle({ swarm: true }, true, false)).toEqual({ checked: true, disabled: false, labelKey: 'shareSwarmOn' })
+    expect(swarmToggle({ swarm: false }, true, false)).toEqual({ checked: false, disabled: false, labelKey: 'shareSwarmOff' })
+    expect(swarmToggle({}, true, false).checked).toBe(false)
+    expect(swarmToggle({ swarm: true }, false, false).disabled).toBe(true)
+    expect(swarmToggle({ swarm: true }, true, true).disabled).toBe(true)
+    // 锁定时即使本地缓存里还带着 swarm=true，也显示为关，并给出提示文案。
+    expect(swarmToggle({ swarm: true, swarmLocked: true }, true, false)).toEqual({ checked: false, disabled: true, labelKey: 'shareSwarmLockedHint' })
   })
 })
 

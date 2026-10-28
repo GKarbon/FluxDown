@@ -1081,12 +1081,18 @@ impl ShareService {
             .as_ref()
             .and_then(|s| serde_json::to_string_pretty(s).ok())
             .unwrap_or_default();
-        let sessions = self
+        let mut sessions = self
             .telemetry
             .diag
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .details(params.session_id.as_deref());
+        if sessions.iter().any(|s| !s.swarm_files.is_empty()) {
+            let names = self.with(|i| i.root_names());
+            for file in sessions.iter_mut().flat_map(|s| s.swarm_files.iter_mut()) {
+                file.file_name = names.get(&file.root_hash).cloned();
+            }
+        }
         ShareDiagnosticsDto {
             snapshot: snapshot.as_ref().map(convert::snapshot),
             snapshot_json,

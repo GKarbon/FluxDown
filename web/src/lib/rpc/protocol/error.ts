@@ -114,6 +114,7 @@ export type ErrorReason =
   | 'shareCloudUnavailable'
   | 'shareOwnShare'
   | 'shareSourceMissing'
+  | 'shareSwarmLocked'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */

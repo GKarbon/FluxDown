@@ -17,8 +17,9 @@ use fluxdown_protocol::{
     ShareHashingDto, ShareLocalConfigDto, ShareLogLevel, ShareLogsParams, ShareMode, ShareNatType,
     ShareNetSnapshotDto, SharePathKind, SharePolicySummaryDto, ShareProgressDto, ShareProvideState,
     ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiverDto,
-    ShareResolveDto, ShareSessionBytesDto, ShareSourcesDto, ShareStateDto, ShareStatus,
-    ShareTaskFactsDto, ShareUploadDto, ShareUploadStatus, apply_agent_event,
+    ShareResolveDto, ShareSessionBytesDto, ShareSessionDetailDto, ShareSessionRole,
+    ShareSourcesDto, ShareStateDto, ShareStatus, ShareTaskFactsDto, ShareUploadDto,
+    ShareUploadStatus, apply_agent_event,
 };
 use serde_json::{Value, json};
 
@@ -96,6 +97,7 @@ fn share_error_reason_literals_are_exact() -> Result<(), serde_json::Error> {
         (ErrorReason::ShareCloudUnavailable, "shareCloudUnavailable"),
         (ErrorReason::ShareOwnShare, "shareOwnShare"),
         (ErrorReason::ShareSourceMissing, "shareSourceMissing"),
+        (ErrorReason::ShareSwarmLocked, "shareSwarmLocked"),
     ];
     for (reason, literal) in cases {
         assert_eq!(serde_json::to_value(reason)?, json!(literal));
@@ -391,6 +393,61 @@ fn swarm_fields_default_for_older_payloads() -> Result<(), serde_json::Error> {
     assert_eq!(serde_json::to_value(SharePathKind::Swarm)?, json!("swarm"));
     let config: ShareLocalConfigDto = serde_json::from_value(json!({}))?;
     assert_eq!((config.default_swarm, config.auto_provide), (None, None));
+    Ok(())
+}
+
+#[test]
+fn swarm_provider_session_and_lock_round_trip_and_default_for_older_payloads()
+-> Result<(), serde_json::Error> {
+    assert_eq!(
+        serde_json::to_value(ShareSessionRole::Swarm)?,
+        json!("swarm")
+    );
+    let detail: ShareSessionDetailDto = serde_json::from_value(json!({
+        "sessionId": "s1",
+        "shareId": "x",
+        "role": "swarm",
+        "peerEndpointId": "peer",
+        "summary": {
+            "startedAt": "now", "connectMs": 0, "pathKind": "directLan",
+            "bytes": { "direct": 9, "relay": 0 }, "paths": [], "events": [], "verifyFailures": 0
+        },
+        "swarmFiles": [
+            { "rootHash": "ab", "fileName": "a.mkv", "bytes": 9, "chunks": 3 },
+            { "rootHash": "cd", "bytes": 1, "chunks": 1 }
+        ]
+    }))?;
+    assert_eq!(detail.role, ShareSessionRole::Swarm);
+    assert_eq!(detail.swarm_files.len(), 2);
+    assert_eq!(detail.swarm_files[0].file_name.as_deref(), Some("a.mkv"));
+    assert_eq!(detail.swarm_files[1].file_name, None);
+    assert_eq!(
+        serde_json::from_value::<ShareSessionDetailDto>(serde_json::to_value(&detail)?)?,
+        detail
+    );
+    // 旧 agent 的会话详情没有 swarmFiles。
+    let old: ShareSessionDetailDto = serde_json::from_value(json!({
+        "sessionId": "s2", "shareId": "x", "role": "sender", "peerEndpointId": "peer",
+        "summary": {
+            "startedAt": "now", "connectMs": 0, "pathKind": "relay",
+            "bytes": { "direct": 0, "relay": 0 }, "paths": [], "events": [], "verifyFailures": 0
+        }
+    }))?;
+    assert!(old.swarm_files.is_empty());
+    // 旧 agent 的分享没有 swarmLocked。
+    let mut wire = serde_json::to_value(ShareDto::default())?;
+    assert_eq!(wire["swarmLocked"], json!(false));
+    if let Some(object) = wire.as_object_mut() {
+        object.remove("swarmLocked");
+    }
+    assert!(!serde_json::from_value::<ShareDto>(wire)?.swarm_locked);
+    let locked = ShareDto {
+        swarm_locked: true,
+        ..ShareDto::default()
+    };
+    let wire = serde_json::to_value(&locked)?;
+    assert_eq!(wire["swarmLocked"], json!(true));
+    assert!(serde_json::from_value::<ShareDto>(wire)?.swarm_locked);
     Ok(())
 }
 

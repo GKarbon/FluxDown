@@ -159,8 +159,9 @@ pub use share::{
     ShareReceiveResultDto, ShareReceiveStatus, ShareReceiverDto, ShareRelayDto, ShareResolveDto,
     ShareResolveParams, ShareSessionBytesDto, ShareSessionDetailDto, ShareSessionKillParams,
     ShareSessionRole, ShareSessionSampleDto, ShareSessionSummaryDto, ShareSourcesDto,
-    ShareStateDto, ShareStatus, ShareStopProvidingParams, ShareSwitchToBridgeParams,
-    ShareTaskFactsDto, ShareTierDto, ShareUpdateParams, ShareUploadDto, ShareUploadStatus,
+    ShareStateDto, ShareStatus, ShareStopProvidingParams, ShareSwarmServedFileDto,
+    ShareSwitchToBridgeParams, ShareTaskFactsDto, ShareTierDto, ShareUpdateParams, ShareUploadDto,
+    ShareUploadStatus,
 };
 pub use table_sync::{
     InvalidPageCursor, LoadedTables, TABLE_SYNC_BACKLOG_LIMIT, TASK_PAGE_DEFAULT_LIMIT,

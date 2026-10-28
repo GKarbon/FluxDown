@@ -6,7 +6,7 @@ import { Badge } from '../../ui'
 import type { BadgeTone } from '../../ui'
 import type { SharePathKind, ShareSessionDetailDto } from '../../lib/rpc'
 import { formatBytes } from '../downloads/dialogs/utils'
-import { NAT_KEYS, PATH_EVENT_KEYS, PATH_KIND_KEYS, bytesSplit, currentPathId, dateTimeLabel, rateLabel, sourceBytesRows } from './model'
+import { NAT_KEYS, PATH_EVENT_KEYS, PATH_KIND_KEYS, SESSION_ROLE_KEYS, bytesSplit, currentPathId, dateTimeLabel, rateLabel, servedFileLabel, sourceBytesRows } from './model'
 
 const PATH_TONE: Record<SharePathKind, BadgeTone> = {
   directLan: 'success',
@@ -65,11 +65,12 @@ export function SessionDetailView({ detail }: { detail: ShareSessionDetailDto })
   const current = currentPathId(summary.events)
   const peerName = detail.peerDeviceName ?? ''
   const peerIsp = detail.peerIsp ?? ''
+  const served = detail.swarmFiles ?? []
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <PathBadge kind={summary.pathKind} />
-        <Badge>{t(detail.role === 'sender' ? 'shareNetRoleSender' : 'shareNetRoleReceiver')}</Badge>
+        <Badge>{t(SESSION_ROLE_KEYS[detail.role])}</Badge>
         <Badge tone={detail.ended ? 'neutral' : 'accent'}>{t(detail.ended ? 'shareNetSessionEnded' : 'shareNetSessionActive')}</Badge>
       </div>
       {summary.error ? (
@@ -95,6 +96,24 @@ export function SessionDetailView({ detail }: { detail: ShareSessionDetailDto })
       </div>
 
       <RateSpark rates={detail.samples.map((sample) => sample.rateBps)} label={t('infoSpeed')} />
+
+      {served.length === 0 ? null : (
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="text-xs font-medium text-foreground">{t('shareDiagSwarmFiles')}</div>
+          <ul className="flex flex-col gap-0.5 text-xs">
+            {served.map((file) => (
+              <li key={file.rootHash} className="flex min-w-0 items-baseline gap-3">
+                <span className="min-w-0 flex-1 truncate text-foreground" title={file.fileName ?? file.rootHash}>
+                  {servedFileLabel(file)}
+                </span>
+                <span className="tabular shrink-0 text-text-tertiary">
+                  {formatBytes(file.bytes)} · {t('shareDiagSwarmChunks', { count: file.chunks })}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="flex min-w-0 flex-col gap-1">
         <div className="text-xs font-medium text-foreground">{t('shareDiagPaths')}</div>

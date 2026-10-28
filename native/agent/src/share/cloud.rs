@@ -172,6 +172,9 @@ pub(super) struct CloudShare {
     /// 加入共享；旧云端不带。
     #[serde(default)]
     pub swarm: bool,
+    /// 管理员已关闭并锁定该分享的共享；旧云端不带。
+    #[serde(default)]
+    pub swarm_locked: bool,
 }
 
 impl CloudShare {
@@ -438,6 +441,9 @@ pub(super) fn share_error(error: &CloudError) -> RpcErrorData {
         }
         (Some("share_cloud_not_ready"), _) => {
             Some((Code::Conflict, false, ErrorReason::ShareCloudNotReady))
+        }
+        (Some("share_swarm_locked"), _) => {
+            Some((Code::Conflict, false, ErrorReason::ShareSwarmLocked))
         }
         (Some("share_takedown"), _) => Some((Code::Conflict, false, ErrorReason::ShareStopped)),
         (Some("share_claims_exhausted" | "share_quota_exceeded" | "share_not_entitled"), _) => {

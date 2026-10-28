@@ -468,7 +468,8 @@ impl ShareService {
         }
     }
 
-    pub(super) async fn kill_sender_session(&self, session_id: &str) {
+    /// 强制中断本机的会话（发送方或共享提供方），云端 `killed` 回应与 `share.sessionKill` 事件共用。
+    pub(super) async fn kill_session(&self, session_id: &str) {
         if let Some(endpoint) = self.with(|i| i.endpoint.clone())
             && endpoint.sender().kill_session(session_id)
         {
@@ -765,7 +766,7 @@ impl ShareService {
             }
             "share.sessionKill" => {
                 if let Some(id) = event.get("sessionId").and_then(Value::as_str) {
-                    self.kill_sender_session(id).await;
+                    self.kill_session(id).await;
                 }
             }
             "share.changed" => self.sync_shares().await,
@@ -842,4 +843,5 @@ pub(super) fn apply_cloud(dto: &mut ShareDto, cloud: &CloudShare) {
     dto.cloud_state = cloud.cloud_state();
     dto.cloud_bytes = u64::try_from(cloud.cloud_bytes).unwrap_or(0);
     dto.swarm = cloud.swarm;
+    dto.swarm_locked = cloud.swarm_locked;
 }

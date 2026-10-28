@@ -6,15 +6,15 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use iroh::EndpointId;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 use super::chunkset::ChunkSet;
@@ -23,11 +23,13 @@ use super::wire::{SwarmReply, SwarmRequest, SwarmStatus};
 use crate::hashing::{CHUNK_SIZE, file_mtime_ms, parse_hash, to_hex, verify_chunk};
 use crate::limiter::RateLimiter;
 use crate::observe::{Observers, SessionEvent};
-use crate::sender::pump_file;
+use crate::sender::{CLOSE_KILLED, pump_file};
+use crate::session::{MonitorConfig, SessionMonitor, close_error};
 use crate::ticket::{
     KeyRing, SCOPE_SWARM, TicketError, TicketExpectation, parse_ticket, verify_ticket,
 };
-use crate::timefmt::now_unix_secs;
+use crate::timefmt::{now_unix_ms, now_unix_secs};
+use crate::types::{PathKind, SessionRole};
 use crate::wire::{read_frame, write_frame};
 
 /// 同一端点同时服务的共享连接上限。
@@ -59,8 +61,13 @@ struct ServerInner {
     keys: KeyRing,
     global_limiter: RateLimiter,
     observers: Observers,
+    report_interval: Duration,
+    local_id: EndpointId,
+    counter: AtomicU64,
     connections: AtomicUsize,
     gets: Semaphore,
+    /// 进行中的提供方会话（会话 ID → 连接上下文），供强制中断查找。
+    live: Mutex<HashMap<String, Arc<ConnCtx>>>,
 }
 
 /// 共享提供端（可克隆，内部共享）。
@@ -75,6 +82,8 @@ impl SwarmServer {
         keys: KeyRing,
         global_limiter: RateLimiter,
         observers: Observers,
+        report_interval: Duration,
+        local_id: EndpointId,
     ) -> Self {
         Self {
             inner: Arc::new(ServerInner {
@@ -82,8 +91,12 @@ impl SwarmServer {
                 keys,
                 global_limiter,
                 observers,
+                report_interval,
+                local_id,
+                counter: AtomicU64::new(0),
                 connections: AtomicUsize::new(0),
                 gets: Semaphore::new(MAX_CONCURRENT_GETS),
+                live: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -91,6 +104,25 @@ impl SwarmServer {
     pub(crate) fn handler(&self) -> SwarmHandler {
         SwarmHandler {
             server: self.clone(),
+        }
+    }
+
+    /// 强制中断一个提供方会话（关闭对应连接）。会话不存在返回 `false`。
+    pub(crate) fn kill_session(&self, session_id: &str) -> bool {
+        let ctx = self
+            .inner
+            .live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        match ctx {
+            Some(ctx) => {
+                ctx.killed.store(true, Ordering::SeqCst);
+                ctx.conn.close(CLOSE_KILLED.into(), b"killed");
+                true
+            }
+            None => false,
         }
     }
 }
@@ -126,8 +158,49 @@ impl Drop for ConnGuard {
 /// 一条连接内共享的上下文。
 struct ConnCtx {
     peer: EndpointId,
+    conn: Connection,
     /// 已授权的内容 → 票据过期时间（Unix 秒）。
     grants: Mutex<HashMap<[u8; 32], u64>>,
+    /// 提供方会话：第一次成功的 `Grant` 时建立。
+    session: OnceLock<SwarmSession>,
+    /// 会话被宿主 / 后台强制中断。
+    killed: AtomicBool,
+}
+
+/// 一条连接的提供方会话。
+struct SwarmSession {
+    id: String,
+    monitor: SessionMonitor,
+}
+
+/// 会话收尾守卫：析构时注销会话并发出终态报告（只生效一次；连接从未授权成功则什么也不做）。
+struct EndGuard {
+    inner: Arc<ServerInner>,
+    ctx: Arc<ConnCtx>,
+    /// 连接结束原因；任务被中止（端点关闭）时为 `None`。
+    ended: Option<ConnectionError>,
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        let Some(session) = self.ctx.session.get() else {
+            return;
+        };
+        self.inner
+            .live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session.id);
+        let error = if self.ctx.killed.load(Ordering::SeqCst) {
+            Some("session killed".to_owned())
+        } else {
+            match &self.ended {
+                Some(reason) => close_error(reason),
+                None => Some("share endpoint shut down".to_owned()),
+            }
+        };
+        session.monitor.finish(error);
+    }
 }
 
 impl SwarmServer {
@@ -140,8 +213,17 @@ impl SwarmServer {
         let _guard = ConnGuard(self.inner.clone());
         let ctx = Arc::new(ConnCtx {
             peer: conn.remote_id(),
+            conn: conn.clone(),
             grants: Mutex::new(HashMap::new()),
+            session: OnceLock::new(),
+            killed: AtomicBool::new(false),
         });
+        // 守卫保证：无论循环正常结束还是 Router 关闭时任务被中止，会话都会收尾并发出终态报告。
+        let mut end = EndGuard {
+            inner: self.inner.clone(),
+            ctx: ctx.clone(),
+            ended: None,
+        };
         let permits = Arc::new(Semaphore::new(STREAMS_PER_CONNECTION));
         let mut streams: JoinSet<()> = JoinSet::new();
         let mut first = true;
@@ -165,8 +247,12 @@ impl SwarmServer {
                     }
                 }
             };
-            let Ok((send, recv)) = accepted else {
-                break;
+            let (send, recv) = match accepted {
+                Ok(pair) => pair,
+                Err(e) => {
+                    end.ended = Some(e);
+                    break;
+                }
             };
             first = false;
             let Ok(permit) = permits.clone().acquire_owned().await else {
@@ -191,7 +277,7 @@ impl SwarmServer {
 
     async fn handle(
         &self,
-        ctx: &ConnCtx,
+        ctx: &Arc<ConnCtx>,
         mut send: SendStream,
         mut recv: RecvStream,
     ) -> Result<()> {
@@ -217,12 +303,18 @@ impl SwarmServer {
             },
             SwarmRequest::Get { root, chunk } => match self.authorized(ctx, &root) {
                 Err(status) => reply_only(&mut send, &SwarmReply::status(status)).await,
-                Ok((root, entry)) => self.get(&mut send, &root, &entry, chunk).await,
+                Ok((root, entry)) => match ctx.session.get() {
+                    Some(session) => {
+                        self.get(&mut send, &session.monitor, &root, &entry, chunk)
+                            .await
+                    }
+                    None => reply_only(&mut send, &SwarmReply::status(SwarmStatus::Internal)).await,
+                },
             },
         }
     }
 
-    fn grant(&self, ctx: &ConnCtx, ticket: &str) -> SwarmReply {
+    fn grant(&self, ctx: &Arc<ConnCtx>, ticket: &str) -> SwarmReply {
         let bad = |status: SwarmStatus, message: String| SwarmReply {
             message,
             ..SwarmReply::status(status)
@@ -264,6 +356,7 @@ impl SwarmServer {
                 "content is not available on this device".to_owned(),
             );
         };
+        self.open_session(ctx, &payload.sid);
         {
             let mut grants = ctx.grants.lock().unwrap_or_else(PoisonError::into_inner);
             if grants.len() >= MAX_GRANTS && !grants.contains_key(&root) {
@@ -276,6 +369,55 @@ impl SwarmServer {
             complete: matches!(entry.source, ContentSource::Complete { .. }),
             ..SwarmReply::status(SwarmStatus::Ok)
         }
+    }
+
+    /// 打开本连接的提供方会话（只有第一次成功的 `Grant` 生效，之后返回已有会话）。
+    ///
+    /// 会话的分享 ID 取第一张被接受的票据里的 `sid`。同一连接上后续票据的 `sid` 不同时仍沿用它：
+    /// 实际中同一连接的各个内容来自同一个接收会话（同一个分享），FluxCloud 按这个分享校验内容根哈希。
+    fn open_session(&self, ctx: &Arc<ConnCtx>, share_id: &str) {
+        ctx.session.get_or_init(|| {
+            let session_id = self.new_session_id();
+            let peer = ctx.peer.to_z32();
+            let monitor = SessionMonitor::spawn(
+                ctx.conn.clone(),
+                MonitorConfig {
+                    session_id: session_id.clone(),
+                    share_id: share_id.to_owned(),
+                    role: SessionRole::Swarm,
+                    peer_endpoint_id: peer.clone(),
+                    connect_ms: 0,
+                    report_interval: self.inner.report_interval,
+                    observers: self.inner.observers.clone(),
+                    kind_tx: Arc::new(watch::channel(PathKind::Unknown).0),
+                    sources: None,
+                },
+            );
+            self.inner
+                .live
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(session_id.clone(), ctx.clone());
+            self.inner.observers.emit(SessionEvent::Opened {
+                session_id: session_id.clone(),
+                share_id: share_id.to_owned(),
+                role: SessionRole::Swarm,
+                peer_endpoint_id: peer,
+            });
+            SwarmSession {
+                id: session_id,
+                monitor,
+            }
+        });
+    }
+
+    fn new_session_id(&self) -> String {
+        format!(
+            "{}-w{:x}-{:x}",
+            self.inner.local_id.fmt_short(),
+            now_unix_ms(),
+            self.inner.counter.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     /// 本连接是否已就 `root` 授权且未过期，且本机仍持有该内容。
@@ -302,10 +444,12 @@ impl SwarmServer {
     async fn get(
         &self,
         send: &mut SendStream,
+        monitor: &SessionMonitor,
         root: &[u8; 32],
         entry: &ContentEntry,
         chunk: u64,
     ) -> Result<()> {
+        let _active = monitor.activity();
         let size = entry.size;
         let Some(start) = chunk.checked_mul(CHUNK_SIZE).filter(|start| *start < size) else {
             return reply_only(send, &SwarmReply::status(SwarmStatus::BadRequest)).await;
@@ -356,18 +500,14 @@ impl SwarmServer {
                     },
                 )
                 .await?;
-                match pump_file(
-                    send,
-                    file,
-                    start,
-                    len,
-                    &[&self.inner.global_limiter],
-                    |_| {},
-                )
+                match pump_file(send, file, start, len, &[&self.inner.global_limiter], |n| {
+                    monitor.add_bytes(n)
+                })
                 .await
                 {
                     Ok(()) => {
                         send.finish().context("finish swarm data")?;
+                        monitor.add_served(&to_hex(root), len);
                         Ok(())
                     }
                     Err(e) => {
@@ -418,8 +558,10 @@ impl SwarmServer {
                 for slice in data.chunks(SLICE) {
                     self.inner.global_limiter.acquire(slice.len()).await;
                     send.write_all(slice).await.context("write swarm data")?;
+                    monitor.add_bytes(slice.len() as u64);
                 }
                 send.finish().context("finish swarm data")?;
+                monitor.add_served(&to_hex(root), len);
                 Ok(())
             }
         }

@@ -5,8 +5,11 @@ use std::time::Duration;
 use fluxdown_share::swarm::wire::{SwarmReply, SwarmRequest, SwarmStatus};
 use fluxdown_share::ticket::sign_ticket;
 use fluxdown_share::wire::{read_frame, write_frame};
-use fluxdown_share::{CHUNK_SIZE, ChunkSet, ReceiveSession, SWARM_ALPN, SwarmFile, SwarmPeer};
-use iroh::endpoint::{Connection, RecvStream};
+use fluxdown_share::{
+    CHUNK_SIZE, ChunkSet, ReceiveSession, SWARM_ALPN, SessionEvent, SessionReport, SessionRole,
+    SwarmFile, SwarmPeer, SwarmServedFile,
+};
+use iroh::endpoint::{Connection, ConnectionError, RecvStream};
 use reqwest::StatusCode;
 
 use crate::common::{
@@ -388,4 +391,216 @@ fn chunkset_bytes_round_trip_and_reject_bad_lengths() {
     assert!(empty.is_empty());
     assert!(empty.to_bytes().is_empty());
     assert!(ChunkSet::from_bytes(0, &[]).is_some());
+}
+
+/// 已向 `provider` 完成一次 swarm 授权的连接。
+struct Granted {
+    rig: Rig,
+    provider: Peer,
+    conn: Connection,
+    root: String,
+}
+
+const SWARM_SID: &str = "swarm-session";
+
+async fn granted_connection() -> Granted {
+    let rig = rig(SWARM_SID, 5 * MIB).await;
+    let provider = provide_peer(rig.signer.ring.clone(), &rig.file);
+    let hint = loopback_hint(&provider.ep).await;
+    let endpoint = rig.receiver.ep.ensure_bound().await.unwrap();
+    let conn = endpoint.connect(hint, SWARM_ALPN).await.unwrap();
+    let root = rig.file.manifest.files[0].root_hash.clone();
+    let ticket = swarm_ticket_for(
+        &rig.signer,
+        SWARM_SID,
+        &rig.receiver.ep,
+        &root,
+        far_future(),
+    );
+    assert_eq!(ask(&conn, &grant(ticket)).await.0.status, SwarmStatus::Ok);
+    Granted {
+        rig,
+        provider,
+        conn,
+        root,
+    }
+}
+
+/// 取一块并读到流结束（服务端在 `finish` 之后才记账，读到 FIN 即保证已记账）。
+async fn fetch_chunk(conn: &Connection, root: &str, chunk: u64) -> u64 {
+    let request = SwarmRequest::Get {
+        root: root.to_owned(),
+        chunk,
+    };
+    let (reply, mut data) = ask(conn, &request).await;
+    assert_eq!(reply.status, SwarmStatus::Ok);
+    let body = data
+        .read_to_end(usize::try_from(CHUNK_SIZE).unwrap() + 1)
+        .await
+        .unwrap();
+    assert_eq!(body.len() as u64, reply.len);
+    reply.len
+}
+
+async fn wait_final_swarm_report(provider: &Peer) -> SessionReport {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let found = provider
+                .sink
+                .sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.is_final && r.role == SessionRole::Swarm)
+                .cloned();
+            if let Some(report) = found {
+                return report;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("no final swarm report")
+}
+
+async fn opened_swarm_session(provider: &mut Peer) -> (String, String, String) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let SessionEvent::Opened {
+                session_id,
+                share_id,
+                role: SessionRole::Swarm,
+                peer_endpoint_id,
+            } = provider.events.recv().await.expect("event channel closed")
+            {
+                return (session_id, share_id, peer_endpoint_id);
+            }
+        }
+    })
+    .await
+    .expect("no swarm session opened")
+}
+
+/// 提供方连接是一个 role=swarm 的会话：分享 ID 取票据 `sid`，按内容累计只计成功发出的 `Get` 数据，
+/// 连接结束发终态报告（路径字节与报告里的服务量一致）。
+#[tokio::test]
+async fn swarm_provider_reports_served_bytes_per_root_and_final() {
+    let mut g = granted_connection().await;
+    let (session_id, share_id, peer) = opened_swarm_session(&mut g.provider).await;
+    assert_eq!(share_id, SWARM_SID);
+    assert_eq!(peer, g.rig.receiver.ep.id_z32());
+
+    // 块 0（4 MiB）、块 1（1 MiB）、块 0 再取一次：累计 9 MiB / 3 块。
+    let mut served = 0;
+    served += fetch_chunk(&g.conn, &g.root, 0).await;
+    served += fetch_chunk(&g.conn, &g.root, 1).await;
+    served += fetch_chunk(&g.conn, &g.root, 0).await;
+    assert_eq!(served, (9 * MIB) as u64);
+    // 越界、未授权的内容、位图查询都不计入服务量。
+    let beyond = SwarmRequest::Get {
+        root: g.root.clone(),
+        chunk: 2,
+    };
+    assert_eq!(
+        ask(&g.conn, &beyond).await.0.status,
+        SwarmStatus::BadRequest
+    );
+    let other = SwarmRequest::Get {
+        root: "ff".repeat(32),
+        chunk: 0,
+    };
+    assert_eq!(ask(&g.conn, &other).await.0.status, SwarmStatus::NotGranted);
+    let have = SwarmRequest::Have {
+        root: g.root.clone(),
+    };
+    assert_eq!(ask(&g.conn, &have).await.0.status, SwarmStatus::Ok);
+
+    g.conn.close(0u32.into(), b"done");
+    let report = wait_final_swarm_report(&g.provider).await;
+    assert_eq!(report.session_id, session_id);
+    assert_eq!(report.share_id, SWARM_SID);
+    assert_eq!(report.role, SessionRole::Swarm);
+    assert_eq!(report.peer_endpoint_id, g.rig.receiver.ep.id_z32());
+    assert_eq!(
+        report.swarm_files,
+        vec![SwarmServedFile {
+            root_hash: g.root.clone(),
+            bytes: served,
+            chunks: 3,
+        }]
+    );
+    assert_eq!(report.summary.error, None);
+    // 发出的 UDP 字节不少于应用层数据（路径统计按发送方向计）。
+    assert!(report.summary.bytes.direct + report.summary.bytes.relay >= served);
+    // 只有这一份终态报告，且所有报告都是 swarm 角色。
+    let reports = g.provider.sink.sessions.lock().unwrap().clone();
+    assert_eq!(reports.iter().filter(|r| r.is_final).count(), 1);
+    assert!(reports.iter().all(|r| r.role == SessionRole::Swarm));
+    // 接收方（本测试里的原始客户端）不产生会话上报。
+    assert!(g.rig.receiver.sink.sessions.lock().unwrap().is_empty());
+}
+
+/// 授权失败的连接不开会话、不上报。
+#[tokio::test]
+async fn failed_grant_opens_no_swarm_session() {
+    let rig = rig("swarm-nogrant", 5 * MIB).await;
+    let mut provider = provide_peer(rig.signer.ring.clone(), &rig.file);
+    let hint = loopback_hint(&provider.ep).await;
+    let endpoint = rig.receiver.ep.ensure_bound().await.unwrap();
+    let conn = endpoint.connect(hint, SWARM_ALPN).await.unwrap();
+    let expired = swarm_ticket_for(
+        &rig.signer,
+        "swarm-nogrant",
+        &rig.receiver.ep,
+        &rig.file.manifest.files[0].root_hash,
+        1,
+    );
+    assert_eq!(
+        ask(&conn, &grant(expired)).await.0.status,
+        SwarmStatus::Expired
+    );
+    conn.close(0u32.into(), b"done");
+    conn.closed().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(provider.sink.sessions.lock().unwrap().is_empty());
+    while let Ok(event) = provider.events.try_recv() {
+        assert!(
+            !matches!(event, SessionEvent::Opened { .. }),
+            "unexpected session: {event:?}"
+        );
+    }
+}
+
+/// `kill_session` 对共享提供方会话同样生效：连接以 0x11 关闭，终态报告带 `session killed`，
+/// 之后会话不再存在。
+#[tokio::test]
+async fn kill_session_closes_swarm_connection() {
+    let mut g = granted_connection().await;
+    let (session_id, _, _) = opened_swarm_session(&mut g.provider).await;
+    fetch_chunk(&g.conn, &g.root, 1).await;
+
+    let sender = g.provider.ep.sender();
+    assert!(!sender.kill_session("no-such-session"));
+    assert!(sender.kill_session(&session_id));
+    let closed = tokio::time::timeout(Duration::from_secs(10), g.conn.closed())
+        .await
+        .expect("swarm connection was not closed");
+    match closed {
+        ConnectionError::ApplicationClosed(app) => assert_eq!(u64::from(app.error_code), 0x11),
+        other => panic!("unexpected close reason: {other:?}"),
+    }
+
+    let report = wait_final_swarm_report(&g.provider).await;
+    assert_eq!(report.session_id, session_id);
+    assert_eq!(report.summary.error.as_deref(), Some("session killed"));
+    // 被中断之前已成功发出的数据仍然记账。
+    assert_eq!(
+        report.swarm_files,
+        vec![SwarmServedFile {
+            root_hash: g.root.clone(),
+            bytes: MIB as u64,
+            chunks: 1,
+        }]
+    );
+    assert!(!sender.kill_session(&session_id), "ended session is gone");
 }

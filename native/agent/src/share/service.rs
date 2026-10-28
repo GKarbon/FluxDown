@@ -436,6 +436,10 @@ impl ShareService {
                 role,
                 peer_endpoint_id,
             } => {
+                // 共享提供方会话只在诊断簿里（遥测出口记入），不进分享 / 接收的界面状态。
+                if role == SessionRole::Swarm {
+                    return;
+                }
                 let opened_role = self.with(|i| {
                     let total_bytes = i
                         .shares
@@ -475,6 +479,7 @@ impl ShareService {
                 match opened_role {
                     SessionRole::Receiver => self.schedule_relay_check(&session_id),
                     SessionRole::Sender => self.schedule_share_sync(),
+                    SessionRole::Swarm => {}
                 }
                 self.publish().await;
             }
@@ -514,11 +519,12 @@ impl ShareService {
                 self.publish_progress(&session_id);
             }
             SessionEvent::Closed { session_id, .. } => {
-                self.with(|i| {
-                    if let Some(meta) = i.sessions.get_mut(&session_id) {
-                        meta.ended = true;
-                        meta.rate_bps = 0;
-                    }
+                let tracked = self.with(|i| {
+                    let Some(meta) = i.sessions.get_mut(&session_id) else {
+                        return false;
+                    };
+                    meta.ended = true;
+                    meta.rate_bps = 0;
                     let mut ended: Vec<(String, String)> = i
                         .sessions
                         .iter()
@@ -530,8 +536,12 @@ impl ShareService {
                     for (_, id) in ended.into_iter().take(excess) {
                         i.sessions.remove(&id);
                     }
+                    true
                 });
-                self.publish().await;
+                // 共享提供方会话不进 `sessions`，只在诊断簿里；没有界面状态要刷新。
+                if tracked {
+                    self.publish().await;
+                }
             }
             SessionEvent::SourceChanged { share_id } => self.on_source_changed(&share_id).await,
             // 共享提供的内容被改 / 删：停止提供并撤销登记。

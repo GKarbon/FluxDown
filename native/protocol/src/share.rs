@@ -188,6 +188,8 @@ pub enum ShareSessionRole {
     Sender,
     /// 接收方（接收字节）。
     Receiver,
+    /// 共享提供方（共享连接上向对端发送内容块）。
+    Swarm,
 }
 
 /// 接收记录的状态。
@@ -310,6 +312,9 @@ pub struct ShareDto {
     /// 该分享是否加入共享（其他持有同一文件的设备可互相取块）。
     #[serde(default)]
     pub swarm: bool,
+    /// 管理员已关闭并锁定该分享的共享：此时 `swarm` 恒为 `false`，且不能再打开。
+    #[serde(default)]
+    pub swarm_locked: bool,
 }
 
 /// 一个有效期档位。
@@ -965,6 +970,20 @@ pub struct ShareSessionSampleDto {
     pub path_kind: SharePathKind,
 }
 
+/// 共享提供方会话里单个内容的累计服务量（镜像 `fluxdown_share::SwarmServedFile`）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ShareSwarmServedFileDto {
+    /// 文件根哈希（64 位小写 hex）。
+    pub root_hash: String,
+    /// 本机已知该内容的文件名（来自本机分享 / 接收记录）；未知为 `None`，UI 回退显示短哈希。
+    #[serde(default)]
+    pub file_name: Option<String>,
+    pub bytes: u64,
+    pub chunks: u64,
+}
+
 /// 一个会话的完整诊断详情。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -988,6 +1007,9 @@ pub struct ShareSessionDetailDto {
     /// 最近的时序采样（内存环形缓冲，旧的在前）。
     #[serde(default)]
     pub samples: Vec<ShareSessionSampleDto>,
+    /// 共享提供方（`role == swarm`）：本连接按内容累计已发送的字节与块数；其他角色为空。
+    #[serde(default)]
+    pub swarm_files: Vec<ShareSwarmServedFileDto>,
 }
 
 /// `agent.share.diagnostics` 结果。

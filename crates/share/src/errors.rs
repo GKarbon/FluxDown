@@ -33,6 +33,7 @@ pub fn reason_key(reason: Option<ErrorReason>) -> &'static str {
         Some(ErrorReason::ShareCloudUnavailable) => "errReasonShareCloudUnavailable",
         Some(ErrorReason::ShareOwnShare) => "errReasonShareOwnShare",
         Some(ErrorReason::ShareSourceMissing) => "errReasonShareSourceMissing",
+        Some(ErrorReason::ShareSwarmLocked) => "errReasonShareSwarmLocked",
         _ => GENERIC_ERROR_KEY,
     }
 }
@@ -74,6 +75,7 @@ mod tests {
                 ErrorReason::ShareCloudUnavailable,
                 "errReasonShareCloudUnavailable",
             ),
+            (ErrorReason::ShareSwarmLocked, "errReasonShareSwarmLocked"),
         ] {
             assert_eq!(error_key(&with(reason)), key);
         }

@@ -21,8 +21,8 @@ use crate::observe::{Observers, SessionEvent};
 use crate::source::{SourceBytes, SourceCounters};
 use crate::timefmt::{now_unix_ms, rfc3339_ms};
 use crate::types::{
-    PathEventEntry, PathKind, PathSummary, SessionBytes, SessionReport, SessionRole, SessionSample,
-    SessionSummary,
+    MAX_SWARM_FILES, PathEventEntry, PathKind, PathSummary, SessionBytes, SessionReport,
+    SessionRole, SessionSample, SessionSummary, SwarmServedFile,
 };
 
 /// 时间线最多保留的事件数。
@@ -105,9 +105,10 @@ struct Inner {
     bytes: AtomicU64,
     verify_failures: AtomicU64,
     active: watch::Sender<usize>,
-    /// 累计开始过多少段传输（单调递增），采样定时器据此判断一个周期内是否有过传输。
     activations: AtomicU64,
     state: Mutex<State>,
+    /// 共享提供方：按内容累计的服务量（键为根哈希 hex）。
+    served: Mutex<BTreeMap<String, SwarmServedFile>>,
     finished: AtomicBool,
     cancel: CancellationToken,
 }
@@ -142,6 +143,7 @@ impl SessionMonitor {
             active: watch::channel(0).0,
             activations: AtomicU64::new(0),
             state: Mutex::new(State::default()),
+            served: Mutex::new(BTreeMap::new()),
             finished: AtomicBool::new(false),
             cancel: CancellationToken::new(),
         });
@@ -168,6 +170,30 @@ impl SessionMonitor {
         ActivityGuard {
             inner: self.inner.clone(),
         }
+    }
+
+    /// 共享提供方：记入一块成功发出的数据（`bytes` 字节）。
+    ///
+    /// 单个会话最多逐条记录 [`MAX_SWARM_FILES`] 个内容，超出的新内容不再逐条记账
+    /// （字节仍计入会话总量）；这是上报契约的条数上限，超限整份报告会被 FluxCloud 拒收。
+    pub(crate) fn add_served(&self, root_hex: &str, bytes: u64) {
+        let mut served = self
+            .inner
+            .served
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !served.contains_key(root_hex) && served.len() >= MAX_SWARM_FILES {
+            return;
+        }
+        let entry = served
+            .entry(root_hex.to_owned())
+            .or_insert_with(|| SwarmServedFile {
+                root_hash: root_hex.to_owned(),
+                bytes: 0,
+                chunks: 0,
+            });
+        entry.bytes = entry.bytes.saturating_add(bytes);
+        entry.chunks = entry.chunks.saturating_add(1);
     }
 
     /// 当前摘要快照（刷新路径统计）。
@@ -360,7 +386,7 @@ impl Inner {
         }
         for path in st.paths.values() {
             let carried = match self.cfg.role {
-                SessionRole::Sender => path.sent,
+                SessionRole::Sender | SessionRole::Swarm => path.sent,
                 SessionRole::Receiver => path.recv,
             };
             match path.kind {
@@ -395,6 +421,13 @@ impl Inner {
             peer_endpoint_id: self.cfg.peer_endpoint_id.clone(),
             summary,
             samples,
+            swarm_files: self
+                .served
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect(),
             is_final,
         }
     }

@@ -47,7 +47,7 @@ const PUMP_DEPTH: usize = 4;
 /// QUIC 应用层关闭码：握手被拒绝。
 const CLOSE_REJECTED: u32 = 0x10;
 /// QUIC 应用层关闭码：会话被宿主 / 后台强制中断。
-const CLOSE_KILLED: u32 = 0x11;
+pub(crate) const CLOSE_KILLED: u32 = 0x11;
 /// 数据流复位码：发送方读文件失败。
 const RESET_INTERNAL: u32 = 0x20;
 
@@ -264,6 +264,8 @@ impl ShareSender {
                     keys.clone(),
                     global_limiter.clone(),
                     observers.clone(),
+                    report_interval,
+                    local_id,
                 ),
                 keys,
                 global_limiter,
@@ -315,21 +317,22 @@ impl ShareSender {
         out
     }
 
-    /// 强制中断一个会话（后台 `share.sessionKill`、分享方手动断开）。会话不存在返回 `false`。
+    /// 强制中断一个会话（后台 `share.sessionKill`、分享方手动断开），含共享提供方会话。
+    /// 会话不存在返回 `false`。
     pub fn kill_session(&self, session_id: &str) -> bool {
-        let sessions = self
-            .inner
-            .sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        match sessions.get(session_id) {
-            Some(s) => {
+        {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(s) = sessions.get(session_id) {
                 s.killed.store(true, Ordering::SeqCst);
                 s.conn.close(CLOSE_KILLED.into(), b"killed");
-                true
+                return true;
             }
-            None => false,
         }
+        self.inner.swarm.kill_session(session_id)
     }
 
     /// 中断某个分享的全部会话（分享被停止 / 下架时）。返回被中断的会话数。

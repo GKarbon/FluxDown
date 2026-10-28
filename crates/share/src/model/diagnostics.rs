@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Local, TimeZone};
 use fluxdown_protocol::{
     ShareDiagnosticsDto, SharePathEventDto, SharePathSummaryDto, ShareSessionBytesDto,
-    ShareSessionDetailDto,
+    ShareSessionDetailDto, ShareSwarmServedFileDto,
 };
 use serde_json::Value;
 
@@ -339,6 +339,15 @@ impl SessionExpansion {
     }
 }
 
+/// 共享提供会话里一个内容的显示名：本机已知的文件名，否则回退到短根哈希。
+#[must_use]
+pub fn served_file_label(file: &ShareSwarmServedFileDto) -> String {
+    match file.file_name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => short_id(&file.root_hash),
+    }
+}
+
 /// 原始快照 JSON 按行拆开（供虚拟列表逐行渲染；保留行首缩进）。
 #[must_use]
 pub fn snapshot_lines(json: &str) -> Vec<String> {
@@ -353,14 +362,15 @@ mod tests {
     use fluxdown_protocol::{
         ShareDiagnosticsDto, SharePathEventDto, SharePathKind, SharePathSummaryDto,
         ShareSessionBytesDto, ShareSessionDetailDto, ShareSessionRole, ShareSessionSummaryDto,
+        ShareSwarmServedFileDto,
     };
     use serde_json::{Value, json};
 
     use super::{
         PLACEHOLDER, SessionExpansion, bytes_split, event_kind_key, filter_metrics, find_session,
         format_bandwidth, format_clock_in, format_loss, format_metric_value, format_rtt,
-        ordered_sessions, path_loss_percent, relay_rows, selected_path_id, short_id,
-        snapshot_lines,
+        ordered_sessions, path_loss_percent, relay_rows, selected_path_id, served_file_label,
+        short_id, snapshot_lines,
     };
 
     fn path(sent: u64, lost: u64) -> SharePathSummaryDto {
@@ -385,6 +395,7 @@ mod tests {
             ended,
             summary: ShareSessionSummaryDto::default(),
             samples: Vec::new(),
+            swarm_files: Vec::new(),
         }
     }
 
@@ -394,6 +405,26 @@ mod tests {
             kind: kind.into(),
             path: path.into(),
         }
+    }
+
+    #[test]
+    fn served_file_label_prefers_the_file_name_and_falls_back_to_the_short_root() {
+        let root = "ab".repeat(32);
+        let named = ShareSwarmServedFileDto {
+            root_hash: root.clone(),
+            file_name: Some("电影 2024 第一季.mkv".into()),
+            bytes: 1,
+            chunks: 1,
+        };
+        assert_eq!(served_file_label(&named), "电影 2024 第一季.mkv");
+        for name in [None, Some(String::new()), Some("  \t".into())] {
+            let unnamed = ShareSwarmServedFileDto {
+                file_name: name,
+                ..named.clone()
+            };
+            assert_eq!(served_file_label(&unnamed), short_id(&root));
+        }
+        assert!(served_file_label(&ShareSwarmServedFileDto::default()).is_empty());
     }
 
     #[test]

@@ -952,8 +952,9 @@ impl SharePanelView {
                 .gap(tokens.spacing.xs + tokens.spacing.xxs)
                 .child(
                     Switch::new("share-chip-swarm")
-                        .checked(share.swarm)
-                        .disabled(!can_edit)
+                        .checked(share.swarm && !share.swarm_locked)
+                        // 管理员锁定后不能再打开（云端会以 `shareSwarmLocked` 拒绝），开关直接置灰。
+                        .disabled(!can_edit || share.swarm_locked)
                         .accessibility_label(text(translator, "shareChipSwarm"))
                         .on_click(move |checked: &bool, _, cx| {
                             let params = ShareUpdateParams {
@@ -968,10 +969,16 @@ impl SharePanelView {
                     div()
                         .text_size(tokens.typography.sm.size)
                         .line_height(tokens.typography.sm.line_height)
-                        .text_color(tokens.colors.foreground)
+                        .text_color(if share.swarm_locked {
+                            tokens.colors.muted_foreground
+                        } else {
+                            tokens.colors.foreground
+                        })
                         .child(text(
                             translator,
-                            if share.swarm {
+                            if share.swarm_locked {
+                                "shareSwarmLockedHint"
+                            } else if share.swarm {
                                 "shareSwarmOn"
                             } else {
                                 "shareSwarmOff"

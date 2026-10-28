@@ -62,6 +62,7 @@ export const REASON_KEYS: Partial<Record<ErrorReason, string>> = {
   shareCloudUnavailable: 'errReasonShareCloudUnavailable',
   shareOwnShare: 'errReasonShareOwnShare',
   shareSourceMissing: 'errReasonShareSourceMissing',
+  shareSwarmLocked: 'errReasonShareSwarmLocked',
   paymentDisabled: 'accountPlanErrorPaymentDisabled',
   paymentGatewayFailed: 'accountPlanErrorGateway',
   planNotPurchasable: 'accountPlanErrorNotPurchasable',

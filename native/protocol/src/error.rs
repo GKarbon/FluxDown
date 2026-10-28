@@ -211,6 +211,8 @@ pub enum ErrorReason {
     ShareOwnShare,
     /// FluxMesh：本机源文件已缺失或已被修改，分享无法继续 / 重新开始，只能删除。
     ShareSourceMissing,
+    /// FluxMesh：管理员已关闭并锁定该分享的共享，不能再打开。
+    ShareSwarmLocked,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

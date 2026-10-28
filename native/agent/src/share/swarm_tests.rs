@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fluxdown_protocol::{
-    AgentEvent, DaemonEvent, ShareConfigDto, ShareDto, ShareProvideState, ShareReceiveRecordDto,
-    ShareReceiveRecordsPage, ShareReceiveResultDto, ShareResolveDto, method,
+    AgentEvent, DaemonEvent, ErrorReason, ShareConfigDto, ShareDiagnosticsDto, ShareDto,
+    ShareProvideState, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiveResultDto,
+    ShareResolveDto, ShareSessionRole, method,
 };
 use fluxdown_share::{EndpointAddr, EndpointId};
 use serde_json::{Value, json};
@@ -545,4 +546,150 @@ async fn restart_resumes_providing_only_for_intact_files() {
 
     pair.a.cancel.cancel();
     b3.cancel.cancel();
+}
+
+/// B 作为共享提供方向 C 发数据：B 的诊断里出现 role=swarm 的会话（按内容累计的服务量 + 文件名），
+/// 同一份数据上报云端；C 断开后会话进入终态。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn swarm_provider_session_is_shown_in_diagnostics_and_reported() {
+    let pair = receive_and_complete("diag", 12 * MIB, true).await;
+    wait_until("B announced as a complete holder", || b_registered(&pair)).await;
+    wait_until("B content offered", || !pair.b.service.content.is_empty()).await;
+    pair.a.cancel.cancel();
+    wait_until("A endpoint released", || {
+        pair.a.service.with(|i| i.endpoint.is_none())
+    })
+    .await;
+
+    let c = node(&pair.base, "swarm_diag_c", false, Vec::new()).await;
+    point_at(&c, &[&pair.b]);
+    let preview: ShareResolveDto = call(
+        &c,
+        method::AGENT_SHARE_RESOLVE,
+        json!({ "codeOrLink": pair.share.pickup_code }),
+    )
+    .await
+    .unwrap();
+    let dir_c = temp_dir("diag_c");
+    let _: ShareReceiveResultDto = call(
+        &c,
+        method::AGENT_SHARE_RECEIVE,
+        json!({ "resolveId": preview.resolve_id, "saveDir": dir_c.to_string_lossy() }),
+    )
+    .await
+    .unwrap();
+    let url = c.tasks.requests.lock().unwrap()[0].url.clone();
+    assert_eq!(fetch(&url).await, pair.payload);
+
+    // C 走掉：B 一侧的共享连接结束，终态报告记入诊断簿。
+    c.cancel.cancel();
+    wait_until("B's swarm session ended", || {
+        pair.b
+            .service
+            .telemetry
+            .diag
+            .lock()
+            .unwrap()
+            .details(None)
+            .iter()
+            .any(|d| d.role == ShareSessionRole::Swarm && d.ended)
+    })
+    .await;
+
+    let diag: ShareDiagnosticsDto = call(&pair.b, method::AGENT_SHARE_DIAGNOSTICS, json!({}))
+        .await
+        .unwrap();
+    let session = diag
+        .sessions
+        .iter()
+        .find(|s| s.role == ShareSessionRole::Swarm)
+        .unwrap();
+    assert_eq!(session.share_id, pair.share.id);
+    assert_eq!(session.peer_endpoint_id, c.service.secret.public().to_z32());
+    assert_eq!(session.swarm_files.len(), 1);
+    let served = &session.swarm_files[0];
+    assert_eq!(served.root_hash, pair.root);
+    let name = pair.mock.shares.lock().unwrap()[0].create_body["files"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(served.file_name.as_deref(), Some(name.as_str()));
+    assert!(served.bytes >= (12 * MIB) as u64 && served.chunks >= 3);
+    // 其他角色的会话没有服务量。
+    assert!(
+        diag.sessions
+            .iter()
+            .filter(|s| s.role != ShareSessionRole::Swarm)
+            .all(|s| s.swarm_files.is_empty())
+    );
+
+    // 展示即上报：云端收到同一个会话的 swarm 终态报告，内容与诊断页一致。
+    wait_until("swarm report posted", || {
+        pair.mock.sessions.lock().unwrap().iter().any(|body| {
+            body["role"] == "swarm"
+                && body["final"] == true
+                && body["sessionId"] == session.session_id.as_str()
+        })
+    })
+    .await;
+    let posted = pair
+        .mock
+        .sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|body| body["role"] == "swarm" && body["final"] == true)
+        .cloned()
+        .unwrap();
+    assert_eq!(posted["shareId"], pair.share.id.as_str());
+    assert_eq!(
+        posted["swarmFiles"],
+        json!([{ "rootHash": pair.root, "bytes": served.bytes, "chunks": served.chunks }])
+    );
+
+    pair.b.cancel.cancel();
+}
+
+/// 管理员关闭并锁定共享：对账后本机分享 `swarm = false`、`swarmLocked = true`；
+/// 再打开被云端拒绝并给出专门的原因，关闭仍允许。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_swarm_lock_is_applied_and_blocks_reenabling() {
+    let (base, mock) = start_mock().await;
+    let (a, _dir, _payload) = sender_with_file(&base, "swarm_lock_a", MIB).await;
+    let share: ShareDto = call(&a, method::AGENT_SHARE_CREATE, json!({ "taskIds": ["t1"] }))
+        .await
+        .unwrap();
+    assert!(share.swarm && !share.swarm_locked);
+
+    {
+        let mut shares = mock.shares.lock().unwrap();
+        shares[0].create_body["swarm"] = json!(false);
+        shares[0].create_body["swarmLocked"] = json!(true);
+    }
+    // 云端 `share.changed` 触发的就是这条对账路径。
+    a.service.sync_shares().await;
+    let local = a.service.with(|i| i.shares[0].dto.clone());
+    assert!(!local.swarm && local.swarm_locked);
+
+    let denied = call::<ShareDto>(
+        &a,
+        method::AGENT_SHARE_UPDATE,
+        json!({ "id": share.id, "swarm": true }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.reason, Some(ErrorReason::ShareSwarmLocked));
+    let still = a.service.with(|i| i.shares[0].dto.clone());
+    assert!(!still.swarm && still.swarm_locked);
+
+    let off: ShareDto = call(
+        &a,
+        method::AGENT_SHARE_UPDATE,
+        json!({ "id": share.id, "swarm": false }),
+    )
+    .await
+    .unwrap();
+    assert!(!off.swarm && off.swarm_locked);
+
+    a.cancel.cancel();
 }

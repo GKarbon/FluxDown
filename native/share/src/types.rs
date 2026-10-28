@@ -276,6 +276,8 @@ pub enum SessionRole {
     Sender,
     /// 接收方（接收字节）。
     Receiver,
+    /// 共享提供方（共享连接上向对端发送内容块）。
+    Swarm,
 }
 
 /// 会话字节归属（按路径类别统计，数据方向上的 UDP 载荷字节）。
@@ -395,10 +397,29 @@ pub struct SessionReport {
     pub summary: SessionSummary,
     /// 自上次上报以来新增的采样。
     pub samples: Vec<SessionSample>,
+    /// 共享提供方：本连接按内容累计（单调不减）已发送的字节与块数，最多 [`MAX_SWARM_FILES`] 条；
+    /// 其他角色为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub swarm_files: Vec<SwarmServedFile>,
     /// 是否终态。
     #[serde(rename = "final")]
     pub is_final: bool,
 }
+
+/// 一条共享连接上单个内容的累计服务量（只计成功发出的 `Get` 数据）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmServedFile {
+    /// 文件根哈希（64 位小写 hex）。
+    pub root_hash: String,
+    /// 已发送的数据字节。
+    pub bytes: u64,
+    /// 已发送的块数。
+    pub chunks: u64,
+}
+
+/// 单份会话报告最多携带的 [`SwarmServedFile`] 条数（FluxCloud 的校验上限）。
+pub const MAX_SWARM_FILES: usize = 64;
 
 // ───────────────────────── 网络快照（§9.4） ─────────────────────────
 

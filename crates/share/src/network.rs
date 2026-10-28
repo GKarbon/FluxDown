@@ -858,6 +858,7 @@ impl NetworkTab {
         let role_key = match session.role {
             ShareSessionRole::Sender => "shareNetRoleSender",
             ShareSessionRole::Receiver => "shareNetRoleReceiver",
+            ShareSessionRole::Swarm => "shareNetRoleSwarm",
         };
         let bytes = SharedString::from(crate::session_view::bytes_summary(
             translator,

@@ -4,6 +4,7 @@
 use fluxdown_protocol::{
     SharePathKind, SharePathSummaryDto, ShareSessionBytesDto, ShareSessionDetailDto,
 };
+use fluxdown_ui_components::tabular_numbers;
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -17,7 +18,7 @@ use crate::{
     model::{
         diagnostics::{
             PLACEHOLDER, bytes_split, event_kind_key, format_bandwidth, format_clock, format_loss,
-            format_millis, format_rtt, selected_path_id, short_id,
+            format_millis, format_rtt, selected_path_id, served_file_label, short_id,
         },
         format_bytes, format_datetime, nat_key, path_kind_key,
     },
@@ -229,11 +230,46 @@ pub(crate) fn session_detail(
         })
         .collect();
 
+    // 共享提供会话：按内容累计的服务量（文件名本机未知时显示短根哈希）。
+    let served: Vec<Div> = detail
+        .swarm_files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            h_flex()
+                .w_full()
+                .items_baseline()
+                .gap(tokens.spacing.md)
+                .child(body_text(cx).flex_1().min_w_0().child(clipped(
+                    format!("{scope}-served-{index}"),
+                    served_file_label(file),
+                )))
+                .child(
+                    meta_text(cx)
+                        .flex_none()
+                        .font_features(tabular_numbers())
+                        .child(SharedString::from(format!(
+                            "{} · {}",
+                            format_bytes(file.bytes),
+                            text_with(
+                                translator,
+                                "shareDiagSwarmChunks",
+                                &[("count", &file.chunks.to_string())],
+                            ),
+                        ))),
+                )
+        })
+        .collect();
+
     v_flex()
         .w_full()
         .gap(tokens.spacing.sm)
         .child(subheading(text(translator, "shareDiagSummary"), cx))
         .child(rows)
+        .when(!served.is_empty(), |this| {
+            this.child(subheading(text(translator, "shareDiagSwarmFiles"), cx))
+                .child(v_flex().w_full().gap(tokens.spacing.xxs).children(served))
+        })
         .child(subheading(text(translator, "shareDiagPaths"), cx))
         .child(v_flex().w_full().gap(tokens.spacing.sm).children(paths))
         .child(subheading(text(translator, "shareDiagTimeline"), cx))

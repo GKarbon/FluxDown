@@ -49,7 +49,7 @@ pub(super) struct Mock {
     signer: SecretKey,
     pub(super) shares: Mutex<Vec<MockShare>>,
     nets: Mutex<Vec<Value>>,
-    sessions: Mutex<Vec<Value>>,
+    pub(super) sessions: Mutex<Vec<Value>>,
     endpoints: Mutex<Vec<String>>,
     guest_share: std::sync::atomic::AtomicBool,
     /// 已签发的游客发送方令牌（每次换取一条）。
@@ -158,7 +158,8 @@ fn share_json(share: &MockShare) -> Value {
         "expiresAt": rfc3339_ms((now_unix_secs() + 3600) * 1000),
         "maxClaims": null, "claimCount": share.claims, "notifyOnClaim": false,
         "status": share.status, "totalBytes": size,
-        "swarm": share.create_body["swarm"].as_bool().unwrap_or(false)
+        "swarm": share.create_body["swarm"].as_bool().unwrap_or(false),
+        "swarmLocked": share.create_body["swarmLocked"].as_bool().unwrap_or(false)
     })
 }
 
@@ -290,6 +291,12 @@ async fn patch_share(
         .find(|s| s.id == id && same_owner(&s.owner, &caller))
     {
         Some(share) => {
+            // 管理员锁定共享后，owner 不能再把它打开（关闭仍允许）。
+            if share.create_body["swarmLocked"].as_bool() == Some(true)
+                && body["swarm"].as_bool() == Some(true)
+            {
+                return error(StatusCode::FORBIDDEN, "share_swarm_locked");
+            }
             if let Some(fields) = body.as_object() {
                 for (key, value) in fields {
                     share.create_body[key.as_str()] = value.clone();

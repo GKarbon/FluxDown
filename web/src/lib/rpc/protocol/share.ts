@@ -21,7 +21,7 @@ export type ShareMode = 'live' | 'cloud';
 export type ShareCloudState = 'none' | 'uploading' | 'ready' | 'deleted' | 'unknown';
 export type ShareUploadStatus = 'uploading' | 'paused' | 'failed';
 export type ShareStatus = 'active' | 'expired' | 'stopped' | 'unknown';
-export type ShareSessionRole = 'sender' | 'receiver';
+export type ShareSessionRole = 'sender' | 'receiver' | 'swarm';
 export type ShareReceiveStatus = 'active' | 'completed' | 'failed';
 
 export interface ShareFileDto {
@@ -75,6 +75,8 @@ export interface ShareDto {
   sourceMissing?: boolean;
   /** 同一内容的其他设备可从本分享共享取块。 */
   swarm?: boolean;
+  /** 管理员已关闭并锁定该分享的共享：此时 `swarm` 恒为 false，且不能再打开。 */
+  swarmLocked?: boolean;
 }
 
 /** 云端暂存上传进度。 */
@@ -414,6 +416,16 @@ export interface ShareSessionSampleDto {
   pathKind: SharePathKind;
 }
 
+/** 共享提供方会话里单个内容的累计服务量。 */
+export interface ShareSwarmServedFileDto {
+  /** 文件根哈希（64 位小写 hex）。 */
+  rootHash: string;
+  /** 本机已知该内容的文件名；未知为 `null`（UI 回退显示短哈希）。 */
+  fileName?: string | null;
+  bytes: number;
+  chunks: number;
+}
+
 export interface ShareSessionDetailDto {
   sessionId: string;
   shareId: string;
@@ -425,6 +437,8 @@ export interface ShareSessionDetailDto {
   ended: boolean;
   summary: ShareSessionSummaryDto;
   samples: ShareSessionSampleDto[];
+  /** 共享提供方（`role === 'swarm'`）：本连接按内容累计已发送的字节与块数；其他角色为空。 */
+  swarmFiles?: ShareSwarmServedFileDto[];
 }
 
 export interface ShareDiagnosticsDto {

@@ -82,9 +82,12 @@ impl DiagBook {
                 ended: false,
                 summary: convert::summary(&report.summary),
                 samples: Vec::new(),
+                swarm_files: Vec::new(),
             });
         detail.summary = convert::summary(&report.summary);
         detail.ended = report.is_final;
+        // 提供方的服务量是连接内累计值，每份报告整体替换。
+        detail.swarm_files = report.swarm_files.iter().map(convert::swarm_file).collect();
         detail
             .samples
             .extend(report.samples.iter().map(convert::sample));
@@ -236,10 +239,10 @@ pub(super) async fn post_loop(
             match post_session(&telemetry, &cloud, &report).await {
                 Ok(killed) => {
                     if killed
-                        && report.role == SessionRole::Sender
+                        && matches!(report.role, SessionRole::Sender | SessionRole::Swarm)
                         && let Some(service) = service.upgrade()
                     {
-                        service.kill_sender_session(&report.session_id).await;
+                        service.kill_session(&report.session_id).await;
                     }
                 }
                 Err(retry) => {

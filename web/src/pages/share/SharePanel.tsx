@@ -25,6 +25,7 @@ import {
   rateLabel,
   shareDisplayStatus,
   shareTitleText,
+  swarmToggle,
   tierLabel,
 } from './model'
 import { CloudSection } from './CloudStorage'
@@ -140,6 +141,7 @@ function ShareBody({ share, nowMs, onClose }: { share: ShareDto; nowMs: number; 
   const [pending, setPending] = useState<'tier' | 'claims' | 'notify' | 'swarm' | null>(null)
   const [stopping, setStopping] = useState(false)
   const expires = dateTimeLabel(share.expiresAt)
+  const swarmView = swarmToggle(share, live, pending === 'swarm')
 
   const update = async (kind: 'tier' | 'claims' | 'notify' | 'swarm', patch: Omit<ShareUpdateParams, 'id'>) => {
     setPending(kind)
@@ -272,12 +274,12 @@ function ShareBody({ share, nowMs, onClose }: { share: ShareDto; nowMs: number; 
         <Chip label={t('shareChipSwarm')}>
           <span className="flex items-center gap-1.5 pr-1.5">
             <Switch
-              checked={share.swarm ?? false}
-              disabled={!live || pending === 'swarm'}
+              checked={swarmView.checked}
+              disabled={swarmView.disabled}
               aria-label={t('shareChipSwarm')}
               onCheckedChange={(swarm) => void update('swarm', { swarm })}
             />
-            <span className="text-xs text-foreground">{t(share.swarm ? 'shareSwarmOn' : 'shareSwarmOff')}</span>
+            <span className="text-xs text-foreground">{t(swarmView.labelKey)}</span>
           </span>
         </Chip>
       </div>

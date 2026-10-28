@@ -14,6 +14,8 @@ import type {
   ShareReceiveRecordDto,
   ShareProvideState,
   ShareSessionBytesDto,
+  ShareSessionRole,
+  ShareSwarmServedFileDto,
   ShareStatus,
   ShareTaskFactsDto,
   ShareTierDto,
@@ -368,6 +370,36 @@ export const NAT_KEYS: Readonly<Record<ShareNatType, string>> = {
   cone: 'shareNatCone',
   symmetric: 'shareNatSymmetric',
   unknown: 'shareNatUnknown',
+}
+
+/** 会话角色的文案键（与 GPUI `shareNetRole*` 同源）。 */
+export const SESSION_ROLE_KEYS: Readonly<Record<ShareSessionRole, string>> = {
+  sender: 'shareNetRoleSender',
+  receiver: 'shareNetRoleReceiver',
+  swarm: 'shareNetRoleSwarm',
+}
+
+/** 端点 / 根哈希的短形式（保留头尾，按字符边界截取）；很短时原样返回（同 GPUI `short_id`）。 */
+export function shortId(id: string): string {
+  const chars = Array.from(id)
+  if (chars.length <= 11) return id
+  return `${chars.slice(0, 6).join('')}…${chars.slice(-4).join('')}`
+}
+
+/** 共享提供会话里一个内容的显示名：本机已知的文件名，否则回退到短根哈希。 */
+export function servedFileLabel(file: Pick<ShareSwarmServedFileDto, 'rootHash' | 'fileName'>): string {
+  const name = file.fileName?.trim() ?? ''
+  return name === '' ? shortId(file.rootHash) : name
+}
+
+/** 共享开关：管理员锁定后恒为关且不可再开；其余按分享是否仍有效。 */
+export function swarmToggle(share: Pick<ShareDto, 'swarm' | 'swarmLocked'>, live: boolean, pending: boolean): { checked: boolean; disabled: boolean; labelKey: string } {
+  const locked = share.swarmLocked ?? false
+  return {
+    checked: (share.swarm ?? false) && !locked,
+    disabled: !live || pending || locked,
+    labelKey: locked ? 'shareSwarmLockedHint' : share.swarm ? 'shareSwarmOn' : 'shareSwarmOff',
+  }
 }
 
 /** 本机网络状态摘要（分享面板状态行 / 网络诊断页用）。 */

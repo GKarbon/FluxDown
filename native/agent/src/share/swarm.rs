@@ -94,6 +94,34 @@ impl Inner {
             .cloned()
     }
 
+    /// 本机已知的「文件根哈希 → 文件名」：分享清单、共享的已落盘文件、下载中的接收文件。
+    /// 诊断页的共享提供会话据此把根哈希显示成文件名；查不到的内容由 UI 回退显示短哈希。
+    pub(super) fn root_names(&self) -> HashMap<String, String> {
+        let mut names = HashMap::new();
+        for stored in &self.shares {
+            for file in &stored.manifest.files {
+                names
+                    .entry(file.root_hash.clone())
+                    .or_insert_with(|| file.name.clone());
+            }
+        }
+        for provide in &self.provides {
+            for file in &provide.files {
+                if let Some(name) = file.path.file_name().and_then(|n| n.to_str()) {
+                    names
+                        .entry(file.root_hash.clone())
+                        .or_insert_with(|| name.to_owned());
+                }
+            }
+        }
+        for task in self.receive_tasks.values() {
+            if let Some(file) = self.task_root(task) {
+                names.entry(file.root_hash).or_insert(file.name);
+            }
+        }
+        names
+    }
+
     /// 一次共享涉及的全部根哈希：已落盘的文件 + 同记录仍在下载的文件。
     fn provide_roots(&self, provide: &StoredProvide) -> Vec<String> {
         let mut roots: Vec<String> = provide.files.iter().map(|f| f.root_hash.clone()).collect();

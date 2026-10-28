@@ -273,6 +273,7 @@ impl Inner {
                 error: None,
             },
             samples: Vec::new(),
+            swarm_files: Vec::new(),
             is_final: true,
         };
         self.endpoint.observers().report_session(&report);
