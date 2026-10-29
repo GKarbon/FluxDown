@@ -60,6 +60,7 @@ object HostMethod {
     const val daemonConfigGet = "daemon.config.get"
     const val daemonConfigPatch = "daemon.config.patch"
     const val daemonConfigProxyTest = "daemon.config.proxyTest"
+    const val daemonConfigProxyRoute = "daemon.config.proxyRoute"
     const val daemonConfigConnPolicy = "daemon.config.connPolicy"
     const val daemonConfigClearConnPolicy = "daemon.config.clearConnPolicy"
     const val daemonConfigSystemProxy = "daemon.config.systemProxy"

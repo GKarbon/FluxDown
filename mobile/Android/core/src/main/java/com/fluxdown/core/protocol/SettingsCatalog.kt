@@ -138,6 +138,7 @@ object SettingsCatalog {
         daemon("proxy_username", text, ""),
         daemon("proxy_password", text, ""),
         daemon("proxy_no_list", text, ""),
+        daemon("proxy_rules", text, ""),
         // Webhook / 组件 / 日志
         daemon("webhook.endpoints", text, ""),
         daemon("component.ffmpeg.path", text, ""),

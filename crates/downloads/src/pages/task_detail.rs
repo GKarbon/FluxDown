@@ -60,6 +60,7 @@ use crate::{
         DownloadTaskView, RowKey, TaskProtocol, TaskState, TaskStore, format_bytes,
         share::ShareHostCaps,
         source_composition::{SourceKind, compose, format_percent},
+        task_route::route_label,
     },
     pages::{
         downloads::{DownloadHostActions, PluginTaskTab},
@@ -1356,6 +1357,10 @@ impl TaskDetailView {
             .map(SharedString::from)
             .unwrap_or_else(|| follow_global.clone());
         let ignore_tls = dto.is_some_and(|dto| dto.ignore_tls_errors);
+        let route = dto
+            .map(|dto| dto.auto_route.as_str())
+            .filter(|route| !route.is_empty())
+            .map(|route| route_label(route, self.translator.read(cx)));
         let queue_label = self
             .queue_label(&row.queue_id)
             .map(SharedString::from)
@@ -1469,6 +1474,9 @@ impl TaskDetailView {
             .child(detail_row(self.t(cx, "taskQueueLabel"), queue_label, cx))
             .child(detail_row(self.t(cx, "taskChecksum"), checksum, cx))
             .child(detail_row(self.t(cx, "taskProxy"), proxy, cx));
+        if let Some(route) = route {
+            list = list.child(detail_row(self.t(cx, "taskRoute"), route, cx));
+        }
 
         if ignore_tls {
             list = list.child(detail_row(
@@ -2321,16 +2329,23 @@ impl TaskDetailView {
             .map(SharedString::from)
             .unwrap_or_else(|| self.t(cx, "detailFollowGlobal"));
         let ignore_tls = dto.is_some_and(|dto| dto.ignore_tls_errors);
+        let route = dto
+            .map(|dto| dto.auto_route.as_str())
+            .filter(|route| !route.is_empty())
+            .map(|route| route_label(route, self.translator.read(cx)));
         drop(row);
-        v_flex()
+        let mut list = v_flex()
             .child(detail_row(self.t(cx, "infoSourcePage"), referrer, cx))
-            .child(detail_row(self.t(cx, "taskProxy"), proxy, cx))
-            .child(detail_row(
-                self.t(cx, "taskIgnoreTlsErrors"),
-                SharedString::from(if ignore_tls { "✓" } else { "—" }),
-                cx,
-            ))
-            .into_any_element()
+            .child(detail_row(self.t(cx, "taskProxy"), proxy, cx));
+        if let Some(route) = route {
+            list = list.child(detail_row(self.t(cx, "taskRoute"), route, cx));
+        }
+        list.child(detail_row(
+            self.t(cx, "taskIgnoreTlsErrors"),
+            SharedString::from(if ignore_tls { "✓" } else { "—" }),
+            cx,
+        ))
+        .into_any_element()
     }
 }
 

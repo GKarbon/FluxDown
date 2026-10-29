@@ -57,6 +57,8 @@ import type {
   LinkProbeParams,
   LinkProbeResult,
   PrepareLogExportResult,
+  ProxyRouteRequest,
+  ProxyRouteResponse,
   ProxyTestRequest,
   ProxyTestResponse,
   QueueDto,
@@ -189,6 +191,8 @@ const config = {
     call<DaemonConfigSnapshot>(METHOD.DAEMON_CONFIG_PATCH, params),
   proxyTest: (params: ProxyTestRequest) =>
     call<ProxyTestResponse>(METHOD.DAEMON_CONFIG_PROXY_TEST, params),
+  proxyRoute: (params: ProxyRouteRequest) =>
+    call<ProxyRouteResponse>(METHOD.DAEMON_CONFIG_PROXY_ROUTE, params),
   connPolicy: () => call<ConnPolicySummaryDto>(METHOD.DAEMON_CONFIG_CONN_POLICY),
   clearConnPolicy: () => call<ConnPolicySummaryDto>(METHOD.DAEMON_CONFIG_CLEAR_CONN_POLICY),
   systemProxy: () => call<SystemProxyDto>(METHOD.DAEMON_CONFIG_SYSTEM_PROXY),

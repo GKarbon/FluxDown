@@ -54,6 +54,7 @@ export const METHOD = {
   DAEMON_CONFIG_GET: 'daemon.config.get',
   DAEMON_CONFIG_PATCH: 'daemon.config.patch',
   DAEMON_CONFIG_PROXY_TEST: 'daemon.config.proxyTest',
+  DAEMON_CONFIG_PROXY_ROUTE: 'daemon.config.proxyRoute',
   DAEMON_CONFIG_CONN_POLICY: 'daemon.config.connPolicy',
   DAEMON_CONFIG_CLEAR_CONN_POLICY: 'daemon.config.clearConnPolicy',
   DAEMON_CONFIG_SYSTEM_PROXY: 'daemon.config.systemProxy',

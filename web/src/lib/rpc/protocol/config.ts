@@ -41,6 +41,35 @@ export interface ProxyTestResponse {
   latencyMs: number;
 }
 
+/** `daemon.config.proxyRoute` 参数：`rules` 缺省 = 用已保存的规则；`url` 为空只做校验。 */
+export interface ProxyRouteRequest {
+  url?: string;
+  rules?: string;
+}
+
+export interface ProxyRuleIssue {
+  /** 规则在数组中的下标（从 0 起）。 */
+  index: number;
+  /** `''` / `id` / `name` / `match` / `pattern` / `action` / `proxy`。 */
+  field: string;
+  code: string;
+  detail: string;
+}
+
+export interface ProxyRouteMatch {
+  index: number;
+  id: string;
+  name: string;
+}
+
+export interface ProxyRouteResponse {
+  issues: ProxyRuleIssue[];
+  matched?: ProxyRouteMatch | null;
+  /** `''` = 未给出 url。 */
+  reason: string;
+  endpoint: string;
+}
+
 /** `daemon.link.probe` 参数：只读 HEAD 探测下载链接。 */
 export interface LinkProbeParams {
   url: string;
@@ -246,6 +275,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   text('proxy_username'),
   text('proxy_password'),
   text('proxy_no_list'),
+  text('proxy_rules'),
   // Webhook：JSON 数组字符串（端点列表）
   text('webhook.endpoints'),
   // 受管组件手动路径（空 = 自动解析）

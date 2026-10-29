@@ -19,6 +19,7 @@ pub(crate) mod shutdown;
 pub(crate) mod source_composition;
 pub(crate) mod speed_limit_recent;
 pub(crate) mod store;
+pub(crate) mod task_route;
 pub(crate) mod view_prefs;
 
 pub(crate) use categories::CategoryIndex;

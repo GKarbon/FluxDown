@@ -21,6 +21,8 @@ pub(crate) mod general;
 mod icon_pack;
 pub(crate) mod notify;
 pub(crate) mod proxy;
+pub(crate) mod proxy_rule_dialog;
+pub(crate) mod proxy_rules;
 pub(crate) mod rate_limit;
 mod retention;
 pub(crate) mod shortcuts;

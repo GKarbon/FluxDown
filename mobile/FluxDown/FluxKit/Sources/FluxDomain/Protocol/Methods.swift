@@ -61,6 +61,7 @@ public enum HostMethod {
     public static let daemonConfigGet = "daemon.config.get"
     public static let daemonConfigPatch = "daemon.config.patch"
     public static let daemonConfigProxyTest = "daemon.config.proxyTest"
+    public static let daemonConfigProxyRoute = "daemon.config.proxyRoute"
     public static let daemonConfigConnPolicy = "daemon.config.connPolicy"
     public static let daemonConfigClearConnPolicy = "daemon.config.clearConnPolicy"
     public static let daemonConfigSystemProxy = "daemon.config.systemProxy"

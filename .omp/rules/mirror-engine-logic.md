@@ -1,5 +1,5 @@
 ---
-description: RSS 过滤 / 文件名解析 / Webhook 事件与端点 / 线程数风险档 / 代理直连名单归一化改动须同步 Web、扩展、agent 与各端
+description: RSS 过滤 / 文件名解析 / Webhook 事件与端点 / 线程数风险档 / 代理直连名单归一化 / 站点代理规则改动须同步 Web、扩展、agent 与各端
 condition: '[\s\S]'
 scope: "tool:edit, tool:write"
 globs:
@@ -15,10 +15,19 @@ globs:
   - '**/web/src/lib/threadsRisk.ts'
   - '**/native/engine/src/proxy_config.rs'
   - '**/native/agent/src/system_proxy.rs'
+  - '**/native/engine/src/proxy_rules.rs'
+  - '**/native/protocol/src/proxy_rules.rs'
+  - '**/web/src/lib/{proxyRules,taskRoute}{,.test}.ts'
+  - '**/crates/downloads/src/model/task_route.rs'
+  - '**/crates/settings/src/sections/proxy_rule{s,_dialog}.rs'
+  - '**/mobile/Android/core/src/main/java/com/fluxdown/core/protocol/ProxyRules.kt'
+  - '**/mobile/Android/app/src/main/java/com/fluxdown/app/feature/task/TaskDetailFormat.kt'
+  - '**/mobile/FluxDown/FluxKit/Sources/FluxDomain/Protocol/ProxyRules.swift'
+  - '**/mobile/FluxDown/FluxDown/Features/Task/TaskDetailText.swift'
 interruptMode: never
 ---
 
-你正在改动引擎侧纯逻辑（RSS 过滤 / 文件名 / Webhook / 线程数 / 代理直连名单）的一侧。下列条目里，标题是事实源一侧、「→」后是必须同回合同步的镜像端：改任一侧都要把另一侧过一遍；有共享夹具的先改夹具用例，再改两侧实现，两侧测试都要跑（`/verify` 第 3 步）。只改了一侧就交付 = 不完整。
+你正在改动引擎侧纯逻辑（RSS 过滤 / 文件名 / Webhook / 线程数 / 代理直连名单 / 站点代理规则）的一侧。下列条目里，标题是事实源一侧、「→」后是必须同回合同步的镜像端：改任一侧都要把另一侧过一遍；有共享夹具的先改夹具用例，再改两侧实现，两侧测试都要跑（`/verify` 第 3 步）。只改了一侧就交付 = 不完整。
 
 ## `engine/src/rss/filter.rs`
 
@@ -43,3 +52,7 @@ interruptMode: never
 ## `native/engine/src/proxy_config.rs::normalize_no_proxy` 与 `parse_scutil_exceptions`（直连名单归一化、macOS `ExceptionsList`）
 
 → `native/agent/src/system_proxy.rs`（`normalize_no_proxy` / `parse_scutil`；agent 不依赖引擎，故各持一份）：`*.x` → `.x`、`a.b.*` 与缩写网段 `169.254/16` → CIDR、`<local>` → 环回 + 私网段近似，两侧写法与用例逐条对齐；环回恒直连两侧都保留
+
+## `native/engine/src/proxy_rules.rs` 的站点代理规则宽松解析与 wire 码（配置键 `proxy_rules`）
+
+→ `native/protocol/src/proxy_rules.rs::parse_proxy_rules`（GPUI）+ Web `web/src/lib/proxyRules.ts` + Android `core/.../protocol/ProxyRules.kt` + iOS `FluxDomain/Protocol/ProxyRules.swift`：空串 / 非法 JSON / 非数组 → 空列表，非对象元素跳过，字段缺失或类型错误回退默认值（`enabled=true`、`match=domain`、`action=direct`、其余空串），编码写全 7 个字段（字段顺序不作要求，测试只比较解析后的值）。匹配只在引擎；客户端经 `daemon.config.proxyRoute` 询问，issue `code` / `reason` 与展示映射四端逐条一致（单条「试一试」草稿强制 `enabled=true`，保存检测用 `upsert(当前列表, draft)`）。路由标签先整串匹配 `rule:direct|system|manual|custom` 再走 `:system`/`:manual` 后缀拆分：GPUI `crates/downloads/src/model/task_route.rs`、Web `web/src/lib/taskRoute.ts`、Android `TaskDetailFormat.kt::routeLabel`、iOS `TaskDetailText.swift::routeLabel`
