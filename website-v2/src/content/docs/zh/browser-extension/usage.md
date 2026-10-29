@@ -42,6 +42,12 @@ sourceHash: "c6ed8d4c0d44"
 
 工具栏图标本身也会反映当前状态(拦截关闭时图标会变暗),不用打开弹窗也能一眼看出。
 
+## 与 SingleFile 一起使用
+
+在 Chrome、Brave 等 Chromium 内核浏览器中同时启用 FluxDown 扩展和 [SingleFile](https://github.com/gildas-lormeau/SingleFile) 时,SingleFile 保存的网页文件名可能变成一串随机 ID(例如 `fc17bc0e-762a-4990-a07d-b8a4b7c91ae2.htm`)。这是 Chromium 的已知问题([crbug 41418926](https://issues.chromium.org/issues/41418926)):只要有扩展在参与下载文件名的决定,其他扩展通过下载接口指定的文件名就可能丢失。IDM、XDown、Video DownloadHelper 等下载扩展同样会触发。
+
+解决方法:打开 SingleFile 的选项,在 **Misc(其他)** 中关闭 **Save pages in background(在后台保存页面)**。之后 SingleFile 改为在页面内保存,文件名恢复正常,FluxDown 的下载拦截也不受影响。
+
 ## fluxdown:// 协议模式
 
 通常情况下,扩展经 Native Messaging 把下载转交给 FluxDown 客户端。弹窗快捷设置和选项页中的 **FluxDown 自定义协议**开关(默认关闭)会切换到另一条通道:被拦截的下载导航到一个 `fluxdown://download?url=...&filename=...` 协议 URL,由操作系统唤起注册了该协议的应用——FluxDown 桌面或 Android 客户端。
