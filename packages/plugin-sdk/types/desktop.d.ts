@@ -1,6 +1,6 @@
 // Auto-generated — add `gpui-kit.d.ts` to your .gitignore.
 //
-// The built-in modules, as TypeScript declarations, for gpui-shell 0.8.0.
+// The built-in modules, as TypeScript declarations, for gpui-shell 0.8.1.
 // Do not edit: gpui-shell rewrites this on every run, in every directory that
 // imports one of them, from the runtime that is about to execute the script. A
 // committed copy could only ever be the stale one.
@@ -23094,7 +23094,7 @@ declare module "gpui-component" {
   /**
    * A stateless command button. Shell disabled, selected, children, style, and on_click operations are honored.
    */
-  export type ButtonElement = Omit<NativeElement, "on_click" | "disabled" | "label" | "tooltip" | "loading" | "size" | "outline" | "primary" | "secondary" | "danger" | "success" | "warning" | "ghost" | "link" | "compact" | "selected" | "role" | "transition"> & {
+  export type ButtonElement = Omit<NativeElement, "on_click" | "disabled" | "label" | "accessibility_label" | "tooltip" | "loading" | "size" | "outline" | "primary" | "secondary" | "danger" | "success" | "warning" | "ghost" | "link" | "compact" | "selected" | "role" | "transition"> & {
     /**
      * Invokes the callback when this component is activated.
      */
@@ -23107,6 +23107,10 @@ declare module "gpui-component" {
      * Sets the visible button label.
      */
     label(label: string): ButtonElement;
+    /**
+     * Sets the accessible name independently of the visible button label.
+     */
+    accessibility_label(accessibility_label: string): ButtonElement;
     /**
      * Sets concise hover help.
      */
