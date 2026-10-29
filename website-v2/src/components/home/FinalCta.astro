@@ -25,7 +25,7 @@ const title = t.title.replace(/<em>(.*?)<\/em>/g, '<span class="serif accent-gra
     <canvas class="cta-sphere" aria-hidden="true" data-sphere></canvas>
     <div class="relative flex flex-col items-center gap-7 text-center">
       <span class="eyebrow" data-scramble>{t.eyebrow}</span>
-      <h2 class="display max-w-[16ch] !text-[clamp(2.4rem,5.6vw,4.6rem)]" data-reveal set:html={title} />
+      <h2 class="cta-title display max-w-[16ch] !text-[clamp(2.1rem,5.6vw,4.6rem)]" data-reveal set:html={title} />
       <p class="lede" data-reveal style="--d:1">{t.lede}</p>
       <div class="flex flex-wrap items-center justify-center gap-3" data-reveal style="--d:2">
         <a href={href("/download", lang)} class="btn btn-primary btn-lg">
@@ -107,6 +107,12 @@ const title = t.title.replace(/<em>(.*?)<\/em>/g, '<span class="serif accent-gra
     40%,
     100% {
       border-color: var(--line);
+    }
+  }
+  /* 窄屏:强调短语独占第二行。balance 换行会把「下载」这类词从中间拆开 */
+  @media (max-width: 639px) {
+    .cta-title :global(.serif) {
+      display: block;
     }
   }
 </style>

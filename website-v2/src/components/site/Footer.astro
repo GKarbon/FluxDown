@@ -87,8 +87,8 @@ const columns: { title: string; links: FooterLink[] }[] = [
 
 <footer class="site-footer frame">
   <div class="rule"></div>
-  <div class="grid gap-x-8 gap-y-12 px-[clamp(20px,4vw,56px)] pb-10 pt-16 sm:grid-cols-3 lg:grid-cols-[1.3fr_repeat(5,1fr)]">
-    <div class="flex flex-col gap-5 sm:col-span-3 lg:col-span-1">
+  <div class="grid grid-cols-2 gap-x-8 gap-y-10 px-[clamp(20px,4vw,56px)] pb-10 pt-16 sm:grid-cols-3 sm:gap-y-12 lg:grid-cols-[1.3fr_repeat(5,1fr)]">
+    <div class="col-span-2 flex flex-col gap-5 sm:col-span-3 lg:col-span-1">
       <Logo size={26} />
       <p class="max-w-[30ch] text-[14px] leading-relaxed text-muted">{common[lang].brandTagline}</p>
       <div class="flex flex-wrap gap-2">
