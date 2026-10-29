@@ -20,9 +20,11 @@ use gpui_component::{
 };
 
 use crate::assets::{CLOUD_ICON_PATH, CROWN_ICON_PATH, REFRESH_ICON_PATH};
+use crate::billing::format_local_date;
+use crate::dialogs::plan_purchase::PurchaseTab;
 use crate::profile_edit::{ProfileField, can_edit_origin_id};
-use crate::t;
 use crate::view::AccountView;
+use crate::{t, t_with};
 
 /// 头像与徽标的浅底透明度。
 const TINT_ALPHA: f32 = 0.12;
@@ -343,6 +345,17 @@ fn plan_row(
             }
         })
         .unwrap_or_else(|| "—".to_owned());
+    let subscription_until = session
+        .active_subscription
+        .as_ref()
+        .filter(|sub| !sub.ends_at.is_empty())
+        .map(|sub| {
+            t_with(
+                translator,
+                "accountSubscriptionUntil",
+                &[("date", &format_local_date(&sub.ends_at))],
+            )
+        });
     let badge =
         plan.and_then(|plan| plan_badge(tokens, extended, plan, session.user.membership_ordinal));
 
@@ -374,19 +387,52 @@ fn plan_row(
                         .text_color(tokens.colors.foreground)
                         .child(plan_name),
                 )
-                .when_some(badge, |this, badge| this.child(badge)),
+                .when_some(badge, |this, badge| this.child(badge))
+                .when_some(subscription_until, |this, text| {
+                    this.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .child(text),
+                    )
+                }),
         )
         .child(
-            button(
-                "account-plan-upgrade",
-                t(translator, "accountPlanUpgrade"),
-                ButtonVariant::Primary,
-                cx,
-            )
-            .disabled(disabled)
-            .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
-                view.open_plan_purchase(window, cx);
-            })),
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(tokens.spacing.sm)
+                .child(
+                    button(
+                        "account-pack-buy",
+                        t(translator, "accountPackBuy"),
+                        ButtonVariant::Secondary,
+                        cx,
+                    )
+                    .disabled(disabled)
+                    .on_click(cx.listener(
+                        |view, _: &ClickEvent, window, cx| {
+                            view.open_plan_purchase(PurchaseTab::Packs, window, cx);
+                        },
+                    )),
+                )
+                .child(
+                    button(
+                        "account-plan-upgrade",
+                        t(translator, "accountPlanUpgrade"),
+                        ButtonVariant::Primary,
+                        cx,
+                    )
+                    .disabled(disabled)
+                    .on_click(cx.listener(
+                        |view, _: &ClickEvent, window, cx| {
+                            view.open_plan_purchase(PurchaseTab::Membership, window, cx);
+                        },
+                    )),
+                ),
         )
 }
 

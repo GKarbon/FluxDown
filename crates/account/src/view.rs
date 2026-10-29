@@ -16,6 +16,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
 
 use crate::controller::AccountController;
+use crate::dialogs::plan_purchase::PurchaseTab;
 use crate::errors::{ErrorContext, error_text};
 use crate::host::{AccountHost, AccountHostEvent};
 use crate::link::now_unix_ms;
@@ -172,10 +173,15 @@ impl AccountView {
         }
     }
 
-    /// 套餐购买对话框；断线 / 退出中不打开。
-    pub(crate) fn open_plan_purchase(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 套餐购买对话框（`tab` 决定初始页签）；断线 / 退出中不打开。
+    pub(crate) fn open_plan_purchase(
+        &mut self,
+        tab: PurchaseTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.signing_out && !self.controller(cx).is_stale() {
-            crate::dialogs::plan_purchase::open(&self.host, window, cx);
+            crate::dialogs::plan_purchase::open(&self.host, tab, window, cx);
         }
     }
 
