@@ -1133,4 +1133,14 @@ impl ShareLinkSink for ShareService {
         self.publish().await;
         Ok(())
     }
+
+    async fn receive_link(&self, link: &str, save_dir: Option<&str>) -> Result<(), RpcErrorData> {
+        self.receive(ShareReceiveParams {
+            code_or_link: Some(link.to_owned()),
+            save_dir: save_dir.map(str::to_owned),
+            ..ShareReceiveParams::default()
+        })
+        .await
+        .map(|_| ())
+    }
 }

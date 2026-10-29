@@ -264,30 +264,11 @@ impl CaptureService {
             .into_iter()
             .flat_map(split_batch)
             .collect::<Vec<_>>();
-        // 分享链接不是下载地址：交给FluxMesh服务解析，等 UI 确认后才建任务；绝不落成下载任务。
+        // 分享链接不是下载地址：交给FluxMesh服务。免打扰的外部接管直接接收全部文件，
+        // 否则只解析并等 UI 确认；绝不落成一条损坏的下载任务。
         let (share_requests, requests): (Vec<_>, Vec<_>) = requests
             .into_iter()
             .partition(|request| fluxdown_protocol::capture_link::is_share_link(&request.url));
-        for request in &share_requests {
-            match &self.share_links {
-                Some(sink) => sink
-                    .open_link(&request.url)
-                    .await
-                    .map_err(CaptureError::Share)?,
-                None => {
-                    return Err(CaptureError::Share(
-                        RpcErrorData::new(ApplicationErrorCode::Unavailable, false)
-                            .with_reason(fluxdown_protocol::ErrorReason::ShareUnavailable),
-                    ));
-                }
-            }
-        }
-        if requests.is_empty() {
-            return Ok(json!({ "taskIds": [], "share": !share_requests.is_empty() }));
-        }
-        if origin == CaptureOrigin::Direct {
-            return self.create_all(requests, None, true, None).await;
-        }
         let (policy, route) = self.events.inspect(|snapshot| {
             let preferences = &snapshot.preferences.values;
             (
@@ -295,6 +276,30 @@ impl CaptureService {
                 crate::category_dir::category_route(preferences),
             )
         });
+        // `Direct`（系统打开 / 拖入）与 `External`（扩展 / NMH）都是用户主动交来的链接，按免打扰偏好分流；
+        // `Prompt`（剪贴板监听）恒走确认。
+        let silent_share = origin != CaptureOrigin::Prompt && policy.silent;
+        for request in &share_requests {
+            let Some(sink) = &self.share_links else {
+                return Err(CaptureError::Share(
+                    RpcErrorData::new(ApplicationErrorCode::Unavailable, false)
+                        .with_reason(fluxdown_protocol::ErrorReason::ShareUnavailable),
+                ));
+            };
+            let result = if silent_share {
+                sink.receive_link(&request.url, policy.remembered_save_dir.as_deref())
+                    .await
+            } else {
+                sink.open_link(&request.url).await
+            };
+            result.map_err(CaptureError::Share)?;
+        }
+        if requests.is_empty() {
+            return Ok(json!({ "taskIds": [], "share": !share_requests.is_empty() }));
+        }
+        if origin == CaptureOrigin::Direct {
+            return self.create_all(requests, None, true, None).await;
+        }
         if origin == CaptureOrigin::External && policy.silent {
             let save_dir = policy.remembered_save_dir.as_deref();
             return self
@@ -1075,6 +1080,58 @@ mod tests {
         let result = capture.submit(captured(), CaptureOrigin::External).await;
         assert!(matches!(result, Err(super::CaptureError::Daemon(_))));
         assert!(capture.list().await.is_empty());
+    }
+
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl crate::share_link::ShareLinkSink for RecordingSink {
+        async fn open_link(&self, link: &str) -> Result<(), fluxdown_protocol::RpcErrorData> {
+            self.0.lock().expect("lock").push(format!("open {link}"));
+            Ok(())
+        }
+
+        async fn receive_link(
+            &self,
+            link: &str,
+            save_dir: Option<&str>,
+        ) -> Result<(), fluxdown_protocol::RpcErrorData> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push(format!("receive {link} {save_dir:?}"));
+            Ok(())
+        }
+    }
+
+    async fn share_calls(prefs: serde_json::Value, origin: CaptureOrigin) -> Vec<String> {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let capture = service(prefs).with_share_links(Some(sink.clone()));
+        let mut request = captured();
+        request.url = "fluxdown://share/abc".to_owned();
+        capture.submit(request, origin).await.expect("share link");
+        assert!(capture.list().await.is_empty());
+        sink.0.lock().expect("lock").clone()
+    }
+
+    #[tokio::test]
+    async fn share_link_receives_directly_only_for_silent_non_prompt_capture() {
+        let silent = json!({ "download.silent_download": true });
+        for origin in [CaptureOrigin::External, CaptureOrigin::Direct] {
+            assert_eq!(
+                share_calls(silent.clone(), origin).await,
+                ["receive fluxdown://share/abc None"]
+            );
+            assert_eq!(
+                share_calls(json!({}), origin).await,
+                ["open fluxdown://share/abc"]
+            );
+        }
+        assert_eq!(
+            share_calls(silent, CaptureOrigin::Prompt).await,
+            ["open fluxdown://share/abc"]
+        );
     }
 
     #[tokio::test]

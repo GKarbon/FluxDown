@@ -12,4 +12,7 @@ use fluxdown_protocol::RpcErrorData;
 pub trait ShareLinkSink: Send + Sync {
     /// 解析链接并登记待确认的接收预览；不创建任何下载任务。
     async fn open_link(&self, link: &str) -> Result<(), RpcErrorData>;
+
+    /// 免打扰接收：解析链接并直接接收全部文件（不经确认预览）。`save_dir` 缺省用 daemon 默认目录。
+    async fn receive_link(&self, link: &str, save_dir: Option<&str>) -> Result<(), RpcErrorData>;
 }
