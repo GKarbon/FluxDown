@@ -29,6 +29,7 @@ pub mod bt_verify;
 /// 外部捕获的分类保存目录路由：建任务时选初始目录，完成前按最终文件名复核落点。
 pub mod category_route;
 pub mod cdn;
+pub(crate) mod client_cache;
 pub mod components;
 /// 请求凭据（Cookie / Authorization / Referer）对锚点 URL 的作用域判定（公共后缀表）。
 pub(crate) mod credential_scope;
@@ -76,12 +77,16 @@ pub(crate) mod path_scheduler;
 pub mod plugin;
 mod proc;
 pub mod proxy_config;
+/// 站点代理规则：规则模型、严格校验、逐请求匹配与「测试网址」解释。
+pub mod proxy_rules;
 /// 排队顺序的增量发布（稳定排序键 + 差异计算）。
 pub mod queue_order;
 /// `ProxyMode::Auto` 各路径单连接速率的跨重启折扣先验。
 pub mod route_health;
 /// RSS 订阅自动下载（feed 轮询 → 规则过滤 → 建任务）。
 pub mod rss;
+/// 站点代理规则的逐请求路由（`RequestSpec.egress`）。
+pub mod rule_route;
 pub mod segment_advisor;
 pub mod segment_coordinator;
 pub mod selection;

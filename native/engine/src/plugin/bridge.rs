@@ -272,6 +272,10 @@ struct BridgeNet {
     dev_auth_client: reqwest::Client,
     /// yt-dlp 子进程用 `--proxy` URL。`None` = 直连，不注入 `--proxy`。#401
     ytdlp_proxy_url: Option<String>,
+    /// 站点规则（全局配置携带）；`private_network_allowed` 的开发模式请求不应用。
+    rules: Option<Arc<crate::proxy_rules::ProxyRuleSet>>,
+    /// 规则出口的守卫 client 缓存，键为（规则下标，是否认证 client）。
+    rule_clients: std::sync::Mutex<HashMap<(usize, bool), reqwest::Client>>,
 }
 
 impl BridgeNet {
@@ -283,7 +287,84 @@ impl BridgeNet {
             dev_client: build_dev_client(false, "开发模式")?,
             dev_auth_client: build_dev_client(true, "开发模式认证")?,
             ytdlp_proxy_url: endpoint.map(|endpoint| endpoint.url),
+            rules: proxy.rules.clone(),
+            rule_clients: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// 该请求使用的 client。命中站点规则时用规则出口的守卫 client（重定向沿用同一出口）；
+    /// 开发模式（`private`）恒直连、不看规则。规则出口构建失败即报错，不回退。
+    async fn client_for(
+        &self,
+        url: &url::Url,
+        private: bool,
+        auth: bool,
+    ) -> Result<reqwest::Client, PluginError> {
+        if private {
+            return Ok(if auth {
+                self.dev_auth_client.clone()
+            } else {
+                self.dev_client.clone()
+            });
+        }
+        let Some(rule) = self
+            .rules
+            .as_ref()
+            .and_then(|rules| rules.first_match_url(url))
+        else {
+            return Ok(if auth {
+                self.auth_client.clone()
+            } else {
+                self.client.clone()
+            });
+        };
+        let key = (rule.index(), auth);
+        if let Some(client) = self
+            .rule_clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(client.clone());
+        }
+        let egress = rule.egress().clone();
+        let label = if auth { "认证守卫" } else { "守卫" };
+        let client = tokio::task::spawn_blocking(move || {
+            let endpoint = crate::egress::proxy_endpoint(&egress.resolve());
+            build_guarded_client(endpoint.as_ref(), auth, label)
+        })
+        .await
+        .map_err(|e| PluginError::Runtime(format!("proxy rule client task failed: {e}")))??;
+        self.rule_clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, client.clone());
+        Ok(client)
+    }
+
+    /// yt-dlp 的 `--proxy` 值：第一个位置参数命中站点规则时取规则出口（直连为 `Some("")`），
+    /// 否则沿用全局出口。
+    async fn ytdlp_proxy_for(&self, args: &[String]) -> Option<String> {
+        let hit = self.rules.as_ref().and_then(|rules| {
+            let url = ytdlp_first_positional_url(args)?;
+            rules
+                .first_match_url(&url)
+                .map(|rule| rule.egress().clone())
+        });
+        let Some(egress) = hit else {
+            return self.ytdlp_proxy_url.clone();
+        };
+        let resolved = tokio::task::spawn_blocking(move || {
+            crate::egress::proxy_endpoint(&egress.resolve()).map(|endpoint| endpoint.url)
+        })
+        .await;
+        match resolved {
+            Ok(url) => Some(url.unwrap_or_default()),
+            Err(e) => {
+                log_warn!("[ytdlp-exec] proxy rule resolve task failed: {e}");
+                self.ytdlp_proxy_url.clone()
+            }
+        }
     }
 }
 
@@ -528,12 +609,9 @@ impl PluginBridge for EngineBridge {
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|_| PluginError::InvalidOutput(format!("HTTP method 非法: {}", req.method)))?;
         let net = self.net();
-        let (client, auth_client) = if req.private_network_allowed {
-            (&net.dev_client, &net.dev_auth_client)
-        } else {
-            (&net.client, &net.auth_client)
-        };
-        let client = if auth_applied { auth_client } else { client };
+        let client = net
+            .client_for(&parsed, req.private_network_allowed, auth_applied)
+            .await?;
         let mut rb = client.request(method, parsed);
         for (k, v) in &req.headers {
             if let (Ok(name), Ok(value)) = (
@@ -1052,22 +1130,23 @@ impl PluginBridge for EngineBridge {
         // subdir，使同插件多次调用共享 nsig/player JS 等缓存；插件自带的
         // `--cache-dir`（只能是牢笼内相对路径）会覆盖此默认，仍在牢笼内。
         cmd.arg("--cache-dir").arg(jail.join(".cache"));
-        let ytdlp_proxy_url = self.net().ytdlp_proxy_url.clone();
+        let ytdlp_proxy_url = self.net().ytdlp_proxy_for(&spec.args).await;
         log_info!(
             "[ytdlp-exec] plugin={} 执行: {} --ignore-config --cache-dir <jail> {}{}",
             plugin_id,
             bin.display(),
             spec.args.join(" "),
-            if ytdlp_proxy_url.is_some() {
-                " --proxy <redacted>"
-            } else {
-                ""
+            match ytdlp_proxy_url.as_deref() {
+                Some("") => " --proxy \"\"",
+                Some(_) => " --proxy <redacted>",
+                None => "",
             },
         );
         cmd.args(&spec.args);
         // 宿主注入代理（#401）：放在 spec.args 之后——yt-dlp 同名开关后者生效，
         // 用户在 App 里配置的代理对子进程权威；未配置代理时不注入，插件自带的
-        // `--proxy`（既有插件的自救路径）仍然可用。
+        // `--proxy`（既有插件的自救路径）仍然可用。站点规则命中直连时注入空值，
+        // yt-dlp 的 `--proxy ""` 表示强制直连。
         if let Some(proxy_url) = &ytdlp_proxy_url {
             cmd.arg("--proxy").arg(proxy_url);
         }
@@ -1693,6 +1772,43 @@ fn ytdlp_args_reject_reason(args: &[String]) -> Option<String> {
     None
 }
 
+/// yt-dlp 参数里的第一个位置参数（待匹配站点规则的 URL）。遍历方式同
+/// [`ytdlp_args_reject_reason`]：带值选项的值不算，`--` 之后一律是位置参数。
+/// 必须能解析为 http(s) URL，否则 `None`。
+fn ytdlp_first_positional_url(args: &[String]) -> Option<url::Url> {
+    let mut it = args.iter();
+    let mut positional_only = false;
+    while let Some(a) = it.next() {
+        if positional_only || !a.starts_with('-') {
+            let parsed = url::Url::parse(a).ok()?;
+            return matches!(parsed.scheme(), "http" | "https").then_some(parsed);
+        }
+        if a == "--" {
+            positional_only = true;
+            continue;
+        }
+        let (name, inline) = if a.starts_with("--") {
+            match a.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (a.as_str(), None),
+            }
+        } else {
+            (a.as_str(), None)
+        };
+        let kind = ytdlp_option_kind(name)?;
+        if kind == YtdlpOpt::Flag {
+            continue;
+        }
+        if inline.is_none() {
+            it.next();
+        }
+        if kind == YtdlpOpt::PrintToFile {
+            it.next();
+        }
+    }
+    None
+}
+
 fn ytdlp_url_reject_reason(a: &str) -> Option<&'static str> {
     let lower = a.to_ascii_lowercase();
     if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -2291,5 +2407,86 @@ mod tests {
         for s in ["2606:4700:4700::1111", "2001:4860:4860::8888"] {
             assert!(is_globally_routable_unicast(ip(s)), "{s} should be allowed");
         }
+    }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use std::sync::Arc;
+
+    use super::{BridgeNet, ytdlp_first_positional_url};
+    use crate::proxy_config::ProxyConfig;
+    use crate::proxy_rules::ProxyRuleSet;
+
+    const RULES: &str = r#"[
+        {"id":"a","match":"domain","pattern":"example.com","action":"custom","proxy":"http://127.0.0.1:9"},
+        {"id":"b","match":"domain","pattern":"direct.test","action":"direct"}
+    ]"#;
+
+    fn net() -> Result<BridgeNet, Box<dyn std::error::Error>> {
+        let rules = ProxyRuleSet::compile(RULES, &ProxyConfig::default());
+        let config = ProxyConfig {
+            rules: Some(Arc::new(rules)),
+            ..ProxyConfig::default()
+        };
+        Ok(BridgeNet::build(&config)?)
+    }
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn first_positional_skips_option_values() {
+        let url = ytdlp_first_positional_url(&args(&[
+            "--referer",
+            "https://referer.test/",
+            "https://example.com/v",
+        ]));
+        assert_eq!(
+            url.map(|u| u.host_str().map(str::to_owned)),
+            Some(Some("example.com".to_string()))
+        );
+        let inline = ytdlp_first_positional_url(&args(&[
+            "--referer=https://referer.test/",
+            "-J",
+            "https://example.com/v",
+        ]));
+        assert!(inline.is_some_and(|u| u.host_str() == Some("example.com")));
+    }
+
+    #[test]
+    fn first_positional_after_double_dash_and_invalid() {
+        let url = ytdlp_first_positional_url(&args(&["--", "https://example.com/x"]));
+        assert!(url.is_some());
+        assert!(ytdlp_first_positional_url(&args(&["-J"])).is_none());
+        assert!(ytdlp_first_positional_url(&args(&["ftp://example.com/x"])).is_none());
+        assert!(ytdlp_first_positional_url(&args(&["not a url"])).is_none());
+    }
+
+    #[tokio::test]
+    async fn ytdlp_proxy_follows_first_positional_rule() -> Result<(), Box<dyn std::error::Error>> {
+        let net = net()?;
+        let hit = net
+            .ytdlp_proxy_for(&args(&[
+                "--referer",
+                "https://direct.test/",
+                "https://example.com/v",
+            ]))
+            .await;
+        assert!(hit.is_some_and(|p| p.starts_with("http://127.0.0.1:9")));
+        let direct = net
+            .ytdlp_proxy_for(&args(&["https://x.direct.test/v"]))
+            .await;
+        assert_eq!(direct, Some(String::new()));
+        let miss = net
+            .ytdlp_proxy_for(&args(&[
+                "--referer",
+                "https://example.com/",
+                "https://other.test/v",
+            ]))
+            .await;
+        assert_eq!(miss, None);
+        Ok(())
     }
 }

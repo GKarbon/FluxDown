@@ -521,6 +521,39 @@ impl DaemonService {
                     Err(error) => Err(actor_error(error)),
                 }
             }
+            method::DAEMON_CONFIG_PROXY_ROUTE => {
+                let params = parse_params::<fluxdown_protocol::ProxyRouteRequest>(params)?;
+                let mut map = self
+                    .db
+                    .get_all_config()
+                    .await
+                    .map_err(|error| internal_error(format!("{error:#}")))?;
+                if let Some(rules) = params.rules {
+                    map.insert(
+                        fluxdown_engine::proxy_rules::PROXY_RULES_KEY.to_owned(),
+                        rules,
+                    );
+                }
+                let url = params.url;
+                let response = tokio::task::spawn_blocking(move || {
+                    let raw = map
+                        .get(fluxdown_engine::proxy_rules::PROXY_RULES_KEY)
+                        .map(String::as_str)
+                        .unwrap_or_default();
+                    let issues = fluxdown_engine::proxy_rules::validate(raw);
+                    let url = url.trim();
+                    let explanation = (!url.is_empty()).then(|| {
+                        fluxdown_engine::proxy_rules::explain(
+                            &fluxdown_engine::proxy_config::ProxyConfig::from_config_map(&map),
+                            url,
+                        )
+                    });
+                    fluxdown_engine_protocol::proxy_route_to_dto(issues, explanation)
+                })
+                .await
+                .map_err(|error| internal_error(format!("{error:#}")))?;
+                to_value(response)
+            }
             method::DAEMON_CONFIG_CONN_POLICY => {
                 let raw = self
                     .db
@@ -2653,6 +2686,83 @@ mod tests {
         );
         assert!(match_site_auth(store, "magnet:?xt=urn:btih:abc").is_none());
         assert!(match_site_auth("not json", "https://example.com/a.bin").is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_route_explains_draft_rules() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_daemon_proxy_route_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create proxy route dir");
+        let db = fluxdown_engine::db::Db::open(&dir)
+            .await
+            .expect("open proxy route db");
+        db.init_default_config("/tmp")
+            .await
+            .expect("seed proxy route config");
+        let events =
+            crate::event_hub::DaemonEventHub::new(fluxdown_protocol::DaemonSnapshot::default(), 32);
+        let selections = crate::selection::DaemonSelection::new(events.clone());
+        let blobs = std::sync::Arc::new(
+            crate::blob_store::BlobStore::open(dir.join("blobs"))
+                .await
+                .expect("open proxy route blobs"),
+        );
+        let service = DaemonService::new(
+            crate::service_hello("proxy-route-test", Vec::new()),
+            events,
+            selections,
+            blobs,
+            crate::actor::DaemonActorHandle::disconnected(),
+            db,
+            dir.clone(),
+            #[cfg(feature = "plugins")]
+            None,
+        );
+        let call = |params: Value| {
+            let service = &service;
+            async move {
+                service
+                    .call_inner(
+                        "proxy-route-test",
+                        true,
+                        fluxdown_protocol::method::DAEMON_CONFIG_PROXY_ROUTE,
+                        Some(params),
+                    )
+                    .await
+                    .expect("proxyRoute call")
+            }
+        };
+
+        let hit = call(json!({
+            "url": "https://x.github.com/a",
+            "rules": r#"[{"id":"a","match":"domain","pattern":"github.com","action":"direct"}]"#,
+        }))
+        .await;
+        assert_eq!(hit["matched"]["index"], json!(0), "{hit}");
+        assert_eq!(hit["reason"], json!("direct"), "{hit}");
+        assert_eq!(hit["issues"], json!([]), "{hit}");
+
+        let miss = call(json!({"url": "https://other.test", "rules": "[]"})).await;
+        assert!(miss["matched"].is_null(), "{miss}");
+        assert_eq!(miss["reason"], json!("modeNone"), "{miss}");
+
+        let bad = call(json!({
+            "rules": r#"[{"id":"a","match":"regex","pattern":"(","action":"direct"}]"#,
+        }))
+        .await;
+        assert_eq!(bad["issues"][0]["field"], json!("pattern"), "{bad}");
+        assert_eq!(bad["issues"][0]["code"], json!("invalidRegex"), "{bad}");
+        assert_eq!(bad["reason"], json!(""), "{bad}");
+
+        drop(service);
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .expect("remove proxy route dir");
     }
 
     #[tokio::test]

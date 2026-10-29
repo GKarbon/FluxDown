@@ -15,6 +15,7 @@ pub mod handshake;
 pub mod local_service;
 pub mod method;
 pub mod plugin_view;
+pub mod proxy_rules;
 pub mod rpc;
 pub mod settings;
 pub mod share;
@@ -91,7 +92,8 @@ pub use daemon::{
     PluginDto, PluginPageScriptDeclDto, PluginPageScriptDto, PluginPageScriptSourceDto,
     PluginPageScriptSourceParams, PluginPageScriptsDto, PluginSetSiteDefaultParams,
     PluginSiteDefaultDto, PluginSniffRulesDto, PluginViewDeclDto, PreviewItemDto,
-    PreviewVariantDto, ProxyTestRequest, ProxyTestResponse, QueueDto, QueueOrderEntryDto,
+    PreviewVariantDto, ProxyRouteMatchDto, ProxyRouteRequest, ProxyRouteResponse,
+    ProxyRuleIssueDto, ProxyTestRequest, ProxyTestResponse, QueueDto, QueueOrderEntryDto,
     QueuePositionDto, QueueScheduleRequest, RenameTaskRequest, ReorderQueueRequest, RequestBody,
     ResolvePreviewRequest, ResolvePreviewResponse, ResolveVariantOptionDto, ResultMessage,
     RssItemActionRequest, RssItemDto, RssSourceDto, RssValidateRequest, RssValidateResponse,

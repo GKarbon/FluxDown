@@ -91,6 +91,44 @@ pub fn egress_plan_to_dto(
     }
 }
 
+/// 将站点规则的校验结果与（可选的）路由解释转换为 wire DTO；`index` 从 0 起。
+#[must_use]
+pub fn proxy_route_to_dto(
+    issues: Vec<fluxdown_engine::proxy_rules::RuleIssue>,
+    explanation: Option<fluxdown_engine::proxy_rules::RouteExplanation>,
+) -> fluxdown_protocol::ProxyRouteResponse {
+    let to_index = |index: usize| u32::try_from(index).unwrap_or(u32::MAX);
+    let issues = issues
+        .into_iter()
+        .map(|issue| fluxdown_protocol::ProxyRuleIssueDto {
+            index: to_index(issue.index),
+            field: issue.field.to_owned(),
+            code: issue.code.to_owned(),
+            detail: issue.detail,
+        })
+        .collect();
+    match explanation {
+        Some(explanation) => fluxdown_protocol::ProxyRouteResponse {
+            issues,
+            matched: explanation
+                .matched
+                .map(|matched| fluxdown_protocol::ProxyRouteMatchDto {
+                    index: to_index(matched.index),
+                    id: matched.id,
+                    name: matched.name,
+                }),
+            reason: explanation.reason.as_str().to_owned(),
+            endpoint: explanation.endpoint,
+        },
+        None => fluxdown_protocol::ProxyRouteResponse {
+            issues,
+            matched: None,
+            reason: String::new(),
+            endpoint: String::new(),
+        },
+    }
+}
+
 /// 将引擎实际传输采样转换成 wire DTO，不推测未知并发。
 #[must_use]
 pub fn task_runtime_to_dto(

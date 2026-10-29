@@ -254,6 +254,8 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field("proxy_username", DaemonConfigKind::Text, ""),
     field("proxy_password", DaemonConfigKind::Text, ""),
     field("proxy_no_list", DaemonConfigKind::Text, ""),
+    // 站点代理规则：JSON 数组（顺序即优先级），模型见 `crate::proxy_rules`。
+    field("proxy_rules", DaemonConfigKind::Text, ""),
     // ── Webhook ──
     field("webhook.endpoints", DaemonConfigKind::Text, ""),
     // ── 受管组件手动路径（空 = 自动解析）──

@@ -64,6 +64,8 @@ pub const DAEMON_GROUP_DELETE: &str = "daemon.group.delete";
 pub const DAEMON_CONFIG_GET: &str = "daemon.config.get";
 pub const DAEMON_CONFIG_PATCH: &str = "daemon.config.patch";
 pub const DAEMON_CONFIG_PROXY_TEST: &str = "daemon.config.proxyTest";
+/// 站点代理规则草稿校验 + 「测试网址」解释（可能起 `scutil` 子进程，慢方法）。
+pub const DAEMON_CONFIG_PROXY_ROUTE: &str = "daemon.config.proxyRoute";
 pub const DAEMON_CONFIG_CONN_POLICY: &str = "daemon.config.connPolicy";
 pub const DAEMON_CONFIG_CLEAR_CONN_POLICY: &str = "daemon.config.clearConnPolicy";
 pub const DAEMON_CONFIG_SYSTEM_PROXY: &str = "daemon.config.systemProxy";
@@ -453,6 +455,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_CONFIG_GET,
     DAEMON_CONFIG_PATCH,
     DAEMON_CONFIG_PROXY_TEST,
+    DAEMON_CONFIG_PROXY_ROUTE,
     DAEMON_CONFIG_CONN_POLICY,
     DAEMON_CONFIG_CLEAR_CONN_POLICY,
     DAEMON_CONFIG_SYSTEM_PROXY,
@@ -671,6 +674,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_RSS_VALIDATE,
     DAEMON_LINK_PROBE,
     DAEMON_CONFIG_PROXY_TEST,
+    DAEMON_CONFIG_PROXY_ROUTE,
     DAEMON_WEBHOOK_TEST,
     DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,
     DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH,

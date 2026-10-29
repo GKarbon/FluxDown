@@ -42,6 +42,8 @@ mod boost;
 mod group_dirs;
 pub use boost::BoostError;
 #[cfg(test)]
+mod egress_tests;
+#[cfg(test)]
 mod import_tests;
 #[cfg(test)]
 mod scaling_tests;
@@ -2300,7 +2302,9 @@ async fn run_http_family_task(run: HttpFamilyRun) {
     }
     // 系统 PAC：在 resolver 补丁定下最终链接之后、任何网络请求之前修正出口。
     // 被取消时直接放行，由下载器在自己的取消检查点走正常终态。
-    let pac_proxy = if use_ed2k {
+    // 站点规则：最终链接若命中另一条规则则整体改道，此时出口已由规则决定，不再套 PAC。
+    let rule_decided = !use_ed2k && crate::rule_route::apply(&mut params).await;
+    let pac_proxy = if use_ed2k || rule_decided {
         None
     } else {
         let cancel = params.cancel_token.clone();
@@ -2760,10 +2764,6 @@ pub enum BatchItemOutcome {
 /// 「解析插件不可用」fail-closed 任务的错误文案。
 const RESOLVER_UNAVAILABLE_MESSAGE: &str = "解析插件不可用";
 
-/// 专属 HTTP client 缓存的容量上限；超出后整体清空重建（与 `system_client`
-/// 同风格的有界缓存，键空间由 代理×UA×TLS 策略 决定，通常只有个位数）。
-const TASK_CLIENT_CACHE_CAP: usize = 64;
-
 /// 后台元数据探测的并发上限。批量导入会一次登记上千个探测，不设闸门会同时
 /// 发起上千个 HEAD 请求。
 const META_PROBE_CONCURRENCY: usize = 8;
@@ -2789,18 +2789,16 @@ impl Drop for ProbeSlot {
     }
 }
 
-/// 代理配置的缓存指纹：覆盖决定出口的全部字段（含鉴权与 no_proxy）。
-fn proxy_fingerprint(proxy: &ProxyConfig) -> String {
-    format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        proxy.mode.as_str(),
-        proxy.proxy_type.as_str(),
-        proxy.host,
-        proxy.port,
-        proxy.username,
-        proxy.password,
-        proxy.no_proxy_list
-    )
+/// [`DownloadManager::task_http_context`] 的产物：任务出口及其逐请求规则路由。
+pub(crate) struct TaskEgress {
+    pub(crate) client: Client,
+    pub(crate) proxy: ProxyConfig,
+    /// 路由标签：Auto 决策标签、站点规则标签（`rule:*`），或空串。
+    pub(crate) route: &'static str,
+    pub(crate) auto_ctx: Option<Arc<crate::auto_proxy::AutoProxyCtx>>,
+    /// 站点规则的逐请求路由器；任务显式指定了代理或没有启用规则时为 `None`。
+    pub(crate) router: Option<Arc<crate::rule_route::EgressRouter>>,
+    pub(crate) pac: crate::pac_route::PacRouting,
 }
 
 /// 创建流水线「准备」阶段的产物：落库行与发布动作所需的全部内存事实。
@@ -3787,9 +3785,6 @@ pub struct DownloadManager {
     integrity_checks: crate::bt_verify::IntegrityChecks,
     /// System 代理模式下按系统代理指纹缓存的全局 client（见 `global_client`）。
     system_client: std::sync::Mutex<Option<(String, Client)>>,
-    /// 专属（任务级代理 / UA / 忽略 TLS / 队列默认 UA / Auto 代理）HTTP client 缓存，
-    /// 键 = (代理指纹, 生效 UA, ignore_tls)。构建一次约 70ms，批量导入不能逐任务重建。
-    task_clients: std::sync::Mutex<HashMap<(String, String, bool), Client>>,
     /// 后台元数据探测的并发闸门（见 [`META_PROBE_CONCURRENCY`]）。
     probe_gate: Arc<Semaphore>,
     /// 已发起且未结束的元数据探测数（含排闸门等待者）；「稍后下载」没有队列位置，
@@ -4011,7 +4006,6 @@ impl DownloadManager {
             #[cfg(feature = "bt")]
             integrity_checks: crate::bt_verify::IntegrityChecks::default(),
             system_client: std::sync::Mutex::new(None),
-            task_clients: std::sync::Mutex::new(HashMap::new()),
             probe_gate: Arc::new(Semaphore::new(META_PROBE_CONCURRENCY)),
             probes_outstanding: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "plugins")]
@@ -5628,6 +5622,22 @@ impl DownloadManager {
         self.auto_failover_attempts.clear();
         crate::route_health::clear_all(&self.db);
         Ok(())
+    }
+
+    /// 只替换站点代理规则（`proxy_rules` 单独变化时）。全局出口不变，因此**不**
+    /// 重建全局 client，也不清 route_health、域名连接上限与 Auto failover 状态；
+    /// 已运行任务沿用启动时的规则快照，之后开始/恢复的任务与新请求使用新规则。
+    pub fn set_proxy_rules(&mut self, rules: Option<Arc<crate::proxy_rules::ProxyRuleSet>>) {
+        let count = rules.as_ref().map_or(0, |r| r.len());
+        self.proxy_config.rules = rules;
+        // 插件 `flux.fetch` / yt-dlp 同样按规则选出口。
+        #[cfg(feature = "plugins")]
+        if let Some(bridge) = &self.plugin_bridge
+            && let Err(error) = bridge.set_proxy_config(&self.proxy_config)
+        {
+            crate::logger::report_warning("plugin", "rebuild_bridge_proxy", &error);
+        }
+        log_info!("[manager] proxy rules updated: {} enabled rule(s)", count);
     }
 
     /// 清空已学习的域名连接上限观察（内存 + 持久化）。
@@ -7259,6 +7269,9 @@ impl DownloadManager {
             if task.status == 4
                 && self.proxy_config.mode == ProxyMode::Auto
                 && task.proxy_url.is_empty()
+                // 出口由站点规则决定的任务不参与 Auto 故障转移：否则会被当成「直连已试过」
+                // 而排一次切到代理的立即重试，绕过规则。
+                && !crate::auto_proxy::route::is_rule_label(&task.auto_route)
                 && !is_bt_url(&task.url)
                 && !is_ed2k_url(&task.url)
                 && let Some(host) = crate::segment_coordinator::extract_host(&task.url)
@@ -9145,7 +9158,7 @@ impl DownloadManager {
                 && !is_bt
                 && self.probes_outstanding.load(Ordering::Relaxed) < META_PROBE_WINDOW
             {
-                let (probe_client, probe_proxy, _) = self.task_http_context(
+                let egress = self.task_http_context(
                     &db_url,
                     &proxy_url,
                     &user_agent,
@@ -9153,13 +9166,15 @@ impl DownloadManager {
                     ignore_tls_errors,
                     None,
                 );
-                let probe_spec = downloader::RequestSpec::from_captured(
+                let mut probe_spec = downloader::RequestSpec::from_captured(
                     method.as_deref(),
                     cookies,
                     referrer,
                     extra_headers,
                     body,
                 );
+                probe_spec.egress = egress.router.clone();
+                let (probe_client, probe_proxy) = (egress.client, egress.proxy);
                 let (interceptor, task_ctx, run_meta) = self
                     .meta_probe_extras(
                         &task_id,
@@ -9249,14 +9264,14 @@ impl DownloadManager {
             // 轮到下载时自然得到名字与大小。
             let in_probe_window = self.pending_queue.len() < META_PROBE_WINDOW;
             let probe_context = (!has_resolver && queued_hint == 0 && in_probe_window).then(|| {
-                let spec = downloader::RequestSpec::from_captured(
+                let mut spec = downloader::RequestSpec::from_captured(
                     queued.method.as_deref(),
                     queued.cookies.clone(),
                     queued.referrer.clone(),
                     queued.extra_headers.clone(),
                     queued.body.clone(),
                 );
-                let (client, proxy, _) = self.task_http_context(
+                let egress = self.task_http_context(
                     &queued.url,
                     &queued.proxy_url,
                     &queued.user_agent,
@@ -9264,7 +9279,8 @@ impl DownloadManager {
                     queued.ignore_tls_errors,
                     None,
                 );
-                (spec, client, proxy)
+                spec.egress = egress.router.clone();
+                (spec, egress.client, egress.proxy)
             });
             let probe_extras = if probe_context.is_some() {
                 Some(
@@ -9510,7 +9526,7 @@ impl DownloadManager {
         if self.proxy_config.mode != ProxyMode::System {
             return self.client.clone();
         }
-        let fingerprint = proxy_fingerprint(resolved);
+        let fingerprint = crate::client_cache::proxy_fingerprint(resolved);
         let mut slot = self
             .system_client
             .lock()
@@ -9534,10 +9550,9 @@ impl DownloadManager {
 
     /// 为当前任务解析代理/UA/TLS 策略并构建一致的 HTTP 上下文。
     ///
-    /// 返回三元组的第三项是 `ProxyMode::Auto` 的启动期决策产物
-    /// `(路由标签, 多路径上下文)`——非 Auto 模式恒为 `("", None)`，
-    /// meta-probe 等只关心 client 的调用方可直接忽略。`forced_route` 为已
-    /// 排程的一次性备用链路（仅任务启动路径消费），client 与标签同源于它。
+    /// 站点代理规则只对「跟随全局」（`proxy_url` 为空）的任务生效：链接命中规则时任务
+    /// 出口取该规则；未命中时取全局模式（含 Auto 决策）。`forced_route` 为已排程的
+    /// 一次性备用链路（仅任务启动路径消费），client 与标签同源于它。
     fn task_http_context(
         &self,
         url: &str,
@@ -9546,24 +9561,76 @@ impl DownloadManager {
         queue_id: &str,
         ignore_tls_errors: bool,
         forced_route: Option<AutoFailoverTarget>,
-    ) -> (
-        Client,
-        ProxyConfig,
-        (&'static str, Option<Arc<crate::auto_proxy::AutoProxyCtx>>),
-    ) {
+    ) -> TaskEgress {
         let queue_ua = self
             .queues
             .get(queue_id)
             .map(|q| q.default_user_agent.as_str())
             .unwrap_or("");
         let resolved_ua = self.resolved_task_ua(user_agent, queue_id);
+        let rules = if proxy_url.is_empty() {
+            self.proxy_config.rules.clone()
+        } else {
+            None
+        };
+        if let Some(rules) = &rules
+            && let Some(rule) = rules.first_match(url)
+        {
+            let proxy = rule.egress().resolve();
+            let route = rule.route_label(&proxy);
+            let index = rule.index();
+            match crate::client_cache::get(&proxy, resolved_ua, ignore_tls_errors) {
+                Ok(client) => {
+                    return TaskEgress {
+                        client,
+                        proxy,
+                        route,
+                        auto_ctx: None,
+                        router: Some(Arc::new(crate::rule_route::EgressRouter::new(
+                            Arc::clone(rules),
+                            Some(index),
+                            resolved_ua,
+                            ignore_tls_errors,
+                        ))),
+                        pac: crate::pac_route::PacRouting::Off,
+                    };
+                }
+                Err(e) => {
+                    crate::logger::report_error("download-manager", "build proxy-rule client", &e);
+                    // base 必须为 None：命中该规则的每个请求都会进入 `client_for`，
+                    // 重建失败时报错让任务失败，而不是悄悄走全局 client 泄漏出去。
+                    return TaskEgress {
+                        client: self.client.clone(),
+                        proxy: self.proxy_config.resolve(),
+                        route: "",
+                        auto_ctx: None,
+                        router: Some(Arc::new(crate::rule_route::EgressRouter::new(
+                            Arc::clone(rules),
+                            None,
+                            resolved_ua,
+                            ignore_tls_errors,
+                        ))),
+                        pac: crate::pac_route::PacRouting::Off,
+                    };
+                }
+            }
+        }
+        let router = rules.map(|r| {
+            Arc::new(crate::rule_route::EgressRouter::new(
+                r,
+                None,
+                resolved_ua,
+                ignore_tls_errors,
+            ))
+        });
+        let pac = self.pac_routing(proxy_url);
         // ProxyMode::Auto 启动期决策（per-task 代理优先级更高，非空时跳过）。
         let auto = if proxy_url.is_empty() {
             self.auto_route_decision(url, resolved_ua, ignore_tls_errors, forced_route)
         } else {
             None
         };
-        let (auto_override, auto_outcome) = match auto {
+        let (auto_override, (route, auto_ctx)) = match auto {
             Some((proxy, route, ctx)) => (Some(proxy), (route, ctx)),
             None => (None, ("", None)),
         };
@@ -9577,7 +9644,14 @@ impl DownloadManager {
             || auto_needs_proxy_client;
         if !needs_dedicated_client {
             let proxy = auto_override.unwrap_or_else(|| self.proxy_config.resolve());
-            return (self.global_client(&proxy), proxy, auto_outcome);
+            return TaskEgress {
+                client: self.global_client(&proxy),
+                proxy,
+                route,
+                auto_ctx,
+                router,
+                pac,
+            };
         }
 
         let proxy = if !proxy_url.is_empty() {
@@ -9589,46 +9663,29 @@ impl DownloadManager {
         } else {
             self.proxy_config.resolve()
         };
-        match self.dedicated_client(&proxy, resolved_ua, ignore_tls_errors) {
-            Ok(client) => (client, proxy, auto_outcome),
+        match crate::client_cache::get(&proxy, resolved_ua, ignore_tls_errors) {
+            Ok(client) => TaskEgress {
+                client,
+                proxy,
+                route,
+                auto_ctx,
+                router,
+                pac,
+            },
             Err(e) => {
                 log_info!("[manager] failed to build per-task client: {}", e);
                 // 构建失败降级为全局直连 client——不再对路由做任何声明
                 // （空标签），避免「标签说代理、实际走直连」的可追溯性谎言。
-                (self.client.clone(), self.proxy_config.resolve(), ("", None))
+                TaskEgress {
+                    client: self.client.clone(),
+                    proxy: self.proxy_config.resolve(),
+                    route: "",
+                    auto_ctx: None,
+                    router,
+                    pac,
+                }
             }
         }
-    }
-
-    /// 取（或构建并缓存）专属 client，键 = (代理指纹, 生效 UA, ignore_tls)。
-    /// 构建一次约 70ms：批量导入的任务几乎共享同一组策略，必须复用。
-    /// 缓存有界（超 [`TASK_CLIENT_CACHE_CAP`] 整体清空），与 `global_client` 的
-    /// `system_client` 同风格。
-    fn dedicated_client(
-        &self,
-        proxy: &ProxyConfig,
-        user_agent: &str,
-        ignore_tls_errors: bool,
-    ) -> Result<Client, downloader::DownloadError> {
-        let key = (
-            proxy_fingerprint(proxy),
-            user_agent.to_owned(),
-            ignore_tls_errors,
-        );
-        let mut cache = self
-            .task_clients
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(client) = cache.get(&key) {
-            return Ok(client.clone());
-        }
-        let client =
-            downloader::build_client_with_tls_policy(proxy, user_agent, ignore_tls_errors)?;
-        if cache.len() >= TASK_CLIENT_CACHE_CAP {
-            cache.clear();
-        }
-        cache.insert(key, client.clone());
-        Ok(client)
     }
 
     /// hint 任务（不得发探测请求）的占位名：名字为空时按 URL（含预签名 URL 的
@@ -10230,7 +10287,14 @@ impl DownloadManager {
             }
         } else {
             let forced_route = self.auto_failover_pending.remove(&task_id);
-            let (task_client, task_proxy, (auto_route, auto_ctx)) = self.task_http_context(
+            let TaskEgress {
+                client: task_client,
+                proxy: task_proxy,
+                route: auto_route,
+                auto_ctx,
+                router: egress_router,
+                pac: pac_routing,
+            } = self.task_http_context(
                 &url,
                 &proxy_url,
                 &user_agent,
@@ -10238,7 +10302,7 @@ impl DownloadManager {
                 ignore_tls_errors,
                 forced_route,
             );
-            // ProxyMode::Auto 可追溯性：启动基线路由落库（非 Auto 写空串清除
+            // ProxyMode::Auto / 站点规则 可追溯性：启动基线路由落库（非 Auto 写空串清除
             // 旧标签），非空时广播给客户端原位刷新详情面板「链路」行。
             if let Err(e) = self.db.set_task_auto_route(&task_id, auto_route).await {
                 log_info!("[manager] task {} auto_route 落库失败: {}", task_id, e);
@@ -10261,13 +10325,14 @@ impl DownloadManager {
             // 构造完整 HTTP 请求事务规格——method/body 来自浏览器扩展，
             // 用于在 form-POST 等非 GET 触发的下载场景中一比一重建原始请求。
             // 参见 downloader.rs 中 RequestSpec / build_request 的设计动机。
-            let spec = downloader::RequestSpec::from_captured(
+            let mut spec = downloader::RequestSpec::from_captured(
                 method.as_deref(),
                 cookies.clone(),
                 referrer.clone(),
                 extra_headers.clone(),
                 body.clone(),
             );
+            spec.egress = egress_router;
 
             // 多 CDN 聚合输入：manager 侧条件（开关/TLS/代理）在此折算；
             // pinned client 的 UA 与任务 client 同源（resolved_task_ua）。
@@ -10361,7 +10426,7 @@ impl DownloadManager {
                     done_tx,
                     spawn_gen,
                     resolver_patch,
-                    pac_routing: self.pac_routing(&proxy_url),
+                    pac_routing,
                 })
                 .instrument(task_span),
             )
@@ -11728,27 +11793,28 @@ impl DownloadManager {
                 name.eq_ignore_ascii_case("user-agent")
                     .then(|| value.clone())
             });
-            let resume_user_agent = match persisted_user_agent {
-                Some(value) => value,
-                None => self.resolved_task_ua("", &task.queue_id).to_string(),
-            };
-            // ProxyMode::Auto：与 start 路径共用决策器；一次性备用链路在此
-            // 消费并直接决定本轮实际 client 与可追溯标签。
+            let persisted_ua = persisted_user_agent.unwrap_or_default();
+            // 与 start 路径共用 `task_http_context`：一次性备用链路（Auto）在此消费，
+            // 站点规则 / Auto 决策 / 专属 client 的取舍只有这一份实现。
             let forced_route = self.auto_failover_pending.remove(&tid);
-            let auto = if task.proxy_url.is_empty() {
-                self.auto_route_decision(
-                    &task.url,
-                    &resume_user_agent,
-                    task.ignore_tls_errors,
-                    forced_route,
-                )
-            } else {
-                None
-            };
-            let (auto_override, (auto_route, auto_ctx)) = match auto {
-                Some((proxy, route, ctx)) => (Some(proxy), (route, ctx)),
-                None => (None, ("", None)),
-            };
+            let TaskEgress {
+                client: task_client,
+                proxy: task_proxy,
+                route: auto_route,
+                auto_ctx,
+                router: egress_router,
+                pac: pac_routing,
+            } = self.task_http_context(
+                &task.url,
+                &task.proxy_url,
+                &persisted_ua,
+                &task.queue_id,
+                task.ignore_tls_errors,
+                forced_route,
+            );
+            let resume_user_agent = self
+                .resolved_task_ua(&persisted_ua, &task.queue_id)
+                .to_string();
             if let Err(e) = self.db.set_task_auto_route(&tid, auto_route).await {
                 log_info!("[manager] task {} auto_route 落库失败: {}", tid, e);
             }
@@ -11758,33 +11824,6 @@ impl DownloadManager {
                     route: auto_route.to_string(),
                 });
             }
-            let needs_rebuild = !task.proxy_url.is_empty()
-                || !resume_user_agent.is_empty()
-                || task.ignore_tls_errors
-                || matches!(&auto_override, Some(p) if p.mode != ProxyMode::None);
-            let (task_client, task_proxy) = if needs_rebuild {
-                let pc = if !task.proxy_url.is_empty() {
-                    ProxyConfig::from_proxy_url(&task.proxy_url).resolve()
-                } else if let Some(p) = auto_override {
-                    p
-                } else {
-                    self.proxy_config.resolve()
-                };
-                match downloader::build_client_with_tls_policy(
-                    &pc,
-                    &resume_user_agent,
-                    task.ignore_tls_errors,
-                ) {
-                    Ok(c) => (c, pc),
-                    Err(e) => {
-                        log_info!("[manager] failed to build per-task client on resume: {}", e);
-                        (self.client.clone(), self.proxy_config.resolve())
-                    }
-                }
-            } else {
-                let pc = auto_override.unwrap_or_else(|| self.proxy_config.resolve());
-                (self.global_client(&pc), pc)
-            };
             let range_verified = self.db.get_task_range_verified(&tid).await.unwrap_or(true);
             #[cfg(feature = "plugins")]
             let range_verified = range_verified || plugin_range_supported;
@@ -11906,13 +11945,17 @@ impl DownloadManager {
                 // 请求体不落库，走到这里的必是 GET 任务（非 GET 任务已在体首以
                 // POST_ONLY_RESUME_MESSAGE 失败）。cookies/referrer/extra_headers
                 // 从 DB 恢复，保住鉴权站点的 resume。
-                spec: downloader::RequestSpec::from_captured(
-                    None,
-                    resume_cookies,
-                    resume_referrer,
-                    resume_extra_headers,
-                    None,
-                ),
+                spec: {
+                    let mut spec = downloader::RequestSpec::from_captured(
+                        None,
+                        resume_cookies,
+                        resume_referrer,
+                        resume_extra_headers,
+                        None,
+                    );
+                    spec.egress = egress_router;
+                    spec
+                },
                 audio_url,
                 auto_max_connections: self.auto_max_connections,
                 use_server_time: self.use_server_time,
@@ -11951,7 +11994,7 @@ impl DownloadManager {
                     done_tx,
                     spawn_gen,
                     resolver_patch,
-                    pac_routing: self.pac_routing(&task.proxy_url),
+                    pac_routing,
                 })
                 .instrument(task_span),
             )
@@ -14449,7 +14492,9 @@ impl DownloadManager {
         &self,
         url: String,
     ) -> impl Future<Output = crate::meta_prober::LinkProbe> + Send + use<> {
-        let client = self.task_http_context(&url, "", "", "", false, None).0;
+        let egress = self.task_http_context(&url, "", "", "", false, None);
+        let client = egress.client;
+        let router = egress.router;
         async move {
             let lower = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
             if !(lower.starts_with("http://") || lower.starts_with("https://")) {
@@ -14461,7 +14506,8 @@ impl DownloadManager {
                     total_bytes: 0,
                 };
             }
-            let spec = crate::downloader::RequestSpec::empty_get();
+            let mut spec = crate::downloader::RequestSpec::empty_get();
+            spec.egress = router;
             crate::meta_prober::probe_link_kind(&url, &client, &spec).await
         }
     }
@@ -15986,6 +16032,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             no_proxy_list: String::new(),
+            rules: None,
         };
         let mut mgr = DownloadManager::new(
             db,

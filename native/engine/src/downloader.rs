@@ -665,6 +665,9 @@ pub struct RequestSpec {
     /// `None` = 不限。与 `origin_headers` 同属插件按次运行叠加的改写，不落库。
     /// 读取请用 [`RequestSpec::range_window_cap`]。
     pub max_range_bytes: Option<i64>,
+    /// 站点代理规则的逐请求路由器。任务「跟随全局」且存在启用规则时由 manager / RSS
+    /// 设置；`DownloadSpec` 的刷新是克隆后修补，会保留该字段。`None` = 规则不参与。
+    pub egress: Option<std::sync::Arc<crate::rule_route::EgressRouter>>,
 }
 
 /// 浏览器扩展/Native Messaging 捕获的原始请求体——引擎侧的传输无关表示。

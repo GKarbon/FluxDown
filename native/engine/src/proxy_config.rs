@@ -9,6 +9,7 @@
 //! - Parsing a Windows `ProxyServer` registry value (multi-protocol format)
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::downloader::DownloadError;
 use crate::logger::log_info;
@@ -171,6 +172,11 @@ pub struct ProxyConfig {
     /// Comma-separated list of hosts/domains to bypass the proxy.
     /// Supports wildcards like `*.local`.
     pub no_proxy_list: String,
+    /// 已编译的站点代理规则（`proxy_rules` 配置键）。**只有 [`Self::from_config_map`]
+    /// 产出的全局配置携带它**；[`Self::resolve`]、[`Self::from_proxy_url`] 与一切派生
+    /// 出口配置（Auto 候选、规则出口、系统代理检测结果）恒为 `None`。
+    /// `build_client_builder` 不读它：规则由调用方逐请求换 client 生效。
+    pub rules: Option<Arc<crate::proxy_rules::ProxyRuleSet>>,
 }
 
 impl Default for ProxyConfig {
@@ -183,6 +189,7 @@ impl Default for ProxyConfig {
             username: String::new(),
             password: String::new(),
             no_proxy_list: String::new(),
+            rules: None,
         }
     }
 }
@@ -209,6 +216,18 @@ impl ProxyConfig {
         let password = map.get("proxy_password").cloned().unwrap_or_default();
         let no_proxy_list = map.get("proxy_no_list").cloned().unwrap_or_default();
 
+        let manual = Self {
+            mode: ProxyMode::Manual,
+            proxy_type: proxy_type.clone(),
+            host: host.clone(),
+            port,
+            username: username.clone(),
+            password: password.clone(),
+            no_proxy_list: String::new(),
+            rules: None,
+        };
+        let rules = crate::proxy_rules::rules_from_config_map(map, &manual);
+
         Self {
             mode,
             proxy_type,
@@ -217,6 +236,7 @@ impl ProxyConfig {
             username,
             password,
             no_proxy_list,
+            rules,
         }
     }
 
@@ -297,7 +317,11 @@ impl ProxyConfig {
             // 非 HTTP-coordinator 路径拿到的 Auto 就是直连语义）。具体
             // 代理只能由 auto_proxy 的缓存/采样决策显式给出。
             ProxyMode::Auto => Self::default(),
-            _ => self.clone(),
+            // 解析后的出口配置不携带站点规则（规则只挂在全局配置上）。
+            _ => Self {
+                rules: None,
+                ..self.clone()
+            },
         }
     }
 
@@ -381,6 +405,7 @@ impl ProxyConfig {
             username,
             password,
             no_proxy_list: String::new(),
+            rules: None,
         }
     }
 }
@@ -489,6 +514,63 @@ pub(crate) fn proxy_bypass_list(user_list: &str) -> String {
     } else {
         loopback_no_proxy(user_list)
     }
+}
+
+/// no_proxy 匹配（逗号/分号分隔）：`*`、精确主机、域后缀（`.x` / `*.x` / `x`）、
+/// 精确 IP 与 CIDR，语义对齐 reqwest::NoProxy。
+pub(crate) fn host_matches_no_proxy(host: &str, list: &str) -> bool {
+    use std::net::IpAddr;
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    let host_ip = host.parse::<IpAddr>().ok();
+    for raw in list.split([',', ';']) {
+        let entry = raw.trim().to_ascii_lowercase();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry == "*" {
+            return true;
+        }
+        if let Some((net, bits)) = entry.split_once('/')
+            && let (Ok(net), Ok(bits), Some(ip)) =
+                (net.parse::<IpAddr>(), bits.parse::<u32>(), host_ip)
+        {
+            let in_net = match (net, ip) {
+                (IpAddr::V4(n), IpAddr::V4(h)) if bits <= 32 => {
+                    let mask = if bits == 0 {
+                        0
+                    } else {
+                        u32::MAX << (32 - bits)
+                    };
+                    u32::from(n) & mask == u32::from(h) & mask
+                }
+                (IpAddr::V6(n), IpAddr::V6(h)) if bits <= 128 => {
+                    let mask = if bits == 0 {
+                        0
+                    } else {
+                        u128::MAX << (128 - bits)
+                    };
+                    u128::from(n) & mask == u128::from(h) & mask
+                }
+                _ => false,
+            };
+            if in_net {
+                return true;
+            }
+            continue;
+        }
+        let suffix = entry.trim_start_matches("*.").trim_start_matches('.');
+        if host == suffix || host.ends_with(&format!(".{suffix}")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 主机是否落在恒直连的环回名单内（测试开关 [`disable_loopback_bypass_for_tests`]
+/// 打开时恒为 `false`）。站点规则据此对环回地址永不匹配。
+pub(crate) fn is_loopback_bypassed(host: &str) -> bool {
+    !LOOPBACK_BYPASS_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
+        && host_matches_no_proxy(host, &LOOPBACK_NO_PROXY.join(","))
 }
 
 /// Detect the system-level proxy from Windows registry.
@@ -915,6 +997,7 @@ fn parse_env_proxy_url(raw: &str) -> Option<ProxyConfig> {
         username,
         password,
         no_proxy_list: first_nonempty_env(&["no_proxy", "NO_PROXY"]).unwrap_or_default(),
+        rules: None,
     })
 }
 
@@ -1829,6 +1912,7 @@ pub async fn test_proxy_connection(
         username: proxy_username.to_string(),
         password: proxy_password.to_string(),
         no_proxy_list: String::new(),
+        rules: None,
     };
 
     let proxy_url = config.to_proxy_url().ok_or_else(|| {
@@ -2138,6 +2222,7 @@ mod tests {
             username: "admin".to_string(),
             password: "secret".to_string(),
             no_proxy_list: String::new(),
+            rules: None,
         };
         assert_eq!(
             config.to_proxy_url().as_deref(),
@@ -2337,6 +2422,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             no_proxy_list: String::new(),
+            rules: None,
         };
         let client = crate::downloader::build_client_with_tls_policy(&config, "", false)
             .expect("build manual socks5 client");
@@ -2549,6 +2635,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             no_proxy_list: String::new(),
+            rules: None,
         };
         assert_eq!(
             config.to_proxy_url().as_deref(),
@@ -2779,6 +2866,7 @@ mod tests {
             username: "user@domain".to_string(),
             password: "p@ss:word".to_string(),
             no_proxy_list: String::new(),
+            rules: None,
         };
         let url = config.to_proxy_url();
         assert!(url.is_some());
@@ -2800,6 +2888,7 @@ mod tests {
             username: "admin@corp".to_string(),
             password: "s3cr3t!".to_string(),
             no_proxy_list: String::new(),
+            rules: None,
         };
         let url = config.to_proxy_url().unwrap_or_default();
         let parsed = ProxyConfig::from_proxy_url(&url);

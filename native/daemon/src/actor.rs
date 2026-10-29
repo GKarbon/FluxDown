@@ -1705,6 +1705,11 @@ async fn patch_config(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
+    if let Some(raw) = values.get(fluxdown_engine::proxy_rules::PROXY_RULES_KEY)
+        && let Some(first) = fluxdown_engine::proxy_rules::validate(raw).first()
+    {
+        return Err(ActorError::InvalidArgument(first.message()));
+    }
     if values
         .keys()
         .any(|key| key.starts_with("proxy_") || key == "global_user_agent")
@@ -2058,13 +2063,21 @@ async fn apply_live_config<'a>(
             .set_user_agent(value.clone())
             .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
     }
-    if keys.iter().any(|key| key.starts_with("proxy_")) {
+    let rules_key = fluxdown_engine::proxy_rules::PROXY_RULES_KEY;
+    if keys
+        .iter()
+        .any(|key| key.starts_with("proxy_") && *key != rules_key)
+    {
         engine
             .manager
             .set_proxy_config(fluxdown_engine::proxy_config::ProxyConfig::from_config_map(
                 all,
             ))
             .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+    } else if keys.contains(&rules_key) {
+        engine.manager.set_proxy_rules(
+            fluxdown_engine::proxy_config::ProxyConfig::from_config_map(all).rules,
+        );
     }
     if keys.iter().any(|key| key.starts_with("bt_")) {
         engine

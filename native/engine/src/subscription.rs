@@ -29,6 +29,9 @@ pub struct SubscriptionFetchRequest {
     /// 已解析的代理配置。**仅内置 `rss` provider 使用**；插件 provider 的
     /// `flux.fetch` 走 bridge 的全局出口，订阅级代理对其不生效。
     pub proxy: ProxyConfig,
+    /// 站点代理规则的逐请求路由器（重定向各跳按规则换出口）。只有内置 `rss`
+    /// provider 使用；插件 provider 走 bridge，由 bridge 自行应用规则。
+    pub egress: Option<std::sync::Arc<crate::rule_route::EgressRouter>>,
 }
 
 /// provider 抓取 future 的返回类型。

@@ -286,6 +286,7 @@ fn auto_ctx(origin_port: u16, proxy_port: u16) -> AutoProxyCtx {
                 username: String::new(),
                 password: String::new(),
                 no_proxy_list: String::new(),
+                rules: None,
             },
             prior_bps: None,
         }],

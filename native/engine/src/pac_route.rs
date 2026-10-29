@@ -113,7 +113,7 @@ async fn apply_system(params: &mut DownloadParams, pac_url: &str) -> Option<Prox
 
 /// 出口改走代理后，多 CDN 钉定节点（直连 IP）与多网卡聚合（绑定本机网卡直连）
 /// 都会旁路代理，必须关闭。
-fn route_through_proxy(params: &mut DownloadParams) {
+pub(crate) fn route_through_proxy(params: &mut DownloadParams) {
     params.cdn.enabled = false;
     if let Some(input) = params.multi_nic.as_ref().filter(|i| !i.blocked_by_proxy) {
         let mut blocked = (**input).clone();

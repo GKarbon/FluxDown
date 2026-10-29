@@ -580,10 +580,11 @@ pub struct TaskDto {
     /// `torrent-file://local` 哨兵，客户端「复制链接」应优先取本字段。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub origin_url: String,
-    /// `ProxyMode::Auto` 的任务级最终链路（可追溯性）：`direct` /
+    /// Auto 路由或站点规则标签（可追溯性）：Auto 为 `direct` /
     /// `direct:sampled` / `direct:pinned` / `direct:failover` /
     /// `proxy:cached` / `proxy:sampled` / `proxy:failover`（代理类标签带
-    /// 候选来源后缀 `:system`/`:manual`）；空 = 非 Auto 模式。
+    /// 候选来源后缀 `:system`/`:manual`）；站点规则为 `rule:direct` /
+    /// `rule:system` / `rule:manual` / `rule:custom`；空串 = 非 Auto 且未命中规则。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auto_route: String,
     /// 加速来源累计字节（多 CDN / 智能代理 / 多网卡）；源站 = 已下载 − 三者之和。
@@ -2285,8 +2286,8 @@ pub enum WsServerMsg {
     QueuesChanged { queues: Vec<QueueDto> },
     /// 单任务队列归属变化（move_task_to_queue 定向广播）。
     TaskQueueChanged { task_id: String, queue_id: String },
-    /// `ProxyMode::Auto` 任务的链路决策落定/变更（详情面板「链路」行）。
-    /// `route` wire 标签同 `TaskDto.autoRoute`；恒非空。
+    /// Auto 路由或站点规则标签的落定/变更（详情面板「链路」行）。
+    /// `route` wire 标签同 `TaskDto.autoRoute`；恒非空（空串 = 非 Auto 且未命中规则，不广播）。
     TaskRouteChanged { task_id: String, route: String },
     /// 队列位置全量替换（首次发布 / 用户调整顺序导致整表重排）；按 `order` 升序。
     QueuePositionsChanged { positions: Vec<QueuePositionDto> },
@@ -2472,6 +2473,57 @@ pub struct ProxyTestRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyTestResponse {
     pub latency_ms: i64,
+}
+
+/// `daemon.config.proxyRoute` 参数：`rules` 为 `Some` 时以该草稿替代已保存的
+/// `proxy_rules` 做校验与解释；`url` 为空时只校验。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRouteRequest {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub rules: Option<String>,
+}
+
+/// 站点代理规则的一条严格校验问题；`index` 为数组下标（从 0 起），`field` 为空表示整表问题。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRuleIssueDto {
+    pub index: u32,
+    pub field: String,
+    pub code: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// 「测试网址」命中的规则；`index` 从 0 起。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRouteMatchDto {
+    pub index: u32,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `daemon.config.proxyRoute` 响应：`reason == ""` 表示请求没有给出 url；
+/// `endpoint` 为 `type://host:port`，绝不带凭据。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRouteResponse {
+    #[serde(default)]
+    pub issues: Vec<ProxyRuleIssueDto>,
+    #[serde(default)]
+    pub matched: Option<ProxyRouteMatchDto>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub endpoint: String,
 }
 
 /// 已保存的站点 HTTP Basic 凭据（`daemon.siteAuth.list`）；不携带密码。
