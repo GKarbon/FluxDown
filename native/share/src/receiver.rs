@@ -351,11 +351,6 @@ impl ReceiveSession {
         *self.inner.kind.borrow()
     }
 
-    /// 订阅来源路径类别变化。
-    pub fn watch_path_kind(&self) -> watch::Receiver<PathKind> {
-        self.inner.kind.subscribe()
-    }
-
     // ───────────── 来源 ─────────────
 
     /// 挂上一个 HTTP 区间来源；同种类的旧来源被替换（并清除其拉黑状态）。
@@ -369,13 +364,6 @@ impl ReceiveSession {
             banned: Arc::new(AtomicBool::new(false)),
         });
         state.slots.sort_by_key(|slot| slot.source.kind());
-    }
-
-    /// 摘掉某个种类的来源。
-    pub fn remove_source(&self, kind: SourceKind) {
-        self.lock_sources()
-            .slots
-            .retain(|slot| slot.source.kind() != kind);
     }
 
     /// 当前挂着且未被拉黑的来源种类（按路线顺序）。

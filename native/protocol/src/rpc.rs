@@ -332,16 +332,6 @@ impl RpcResponse {
             error: RpcErrorObject::parse_error(message),
         })
     }
-
-    /// 创建无法恢复请求 ID 的无效请求响应。
-    #[must_use]
-    pub fn invalid_request_failure(message: impl Into<String>) -> Self {
-        Self::Failure(RpcFailureResponse {
-            jsonrpc: JSONRPC_VERSION.to_owned(),
-            id: None,
-            error: RpcErrorObject::invalid_request(message),
-        })
-    }
 }
 
 fn validate_jsonrpc_version(version: &str) -> Result<(), RpcErrorData> {
