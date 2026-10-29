@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { formatAddrList, parseAddrList, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire } from './localConfig'
+import { formatAddrList, formatDailyCap, parseAddrList, parseDailyCap, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire } from './localConfig'
 
 describe('port', () => {
   test('empty is automatic; valid range accepted; garbage rejected', () => {
@@ -44,5 +44,20 @@ describe('portmapper', () => {
     expect(portmapperWire('auto')).toBeNull()
     expect(portmapperWire('on')).toBe(true)
     expect(portmapperWire('off')).toBe(false)
+  })
+})
+
+describe('daily cap', () => {
+  test('empty follows cloud, zero is unlimited, GB converts to bytes', () => {
+    expect(parseDailyCap('')).toBeNull()
+    expect(parseDailyCap(' 0 ')).toBe(0)
+    expect(parseDailyCap('2')).toBe(2 * 1024 ** 3)
+    expect(parseDailyCap('0.5')).toBe(512 * 1024 ** 2)
+    expect(parseDailyCap('-1')).toBeUndefined()
+    expect(parseDailyCap('abc')).toBeUndefined()
+    expect(formatDailyCap(null)).toBe('')
+    expect(formatDailyCap(undefined)).toBe('')
+    expect(formatDailyCap(0)).toBe('0')
+    expect(formatDailyCap(1.5 * 1024 ** 3)).toBe('1.5')
   })
 })

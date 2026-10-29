@@ -3,13 +3,13 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use fluxdown_protocol::{
-    ApplicationErrorCode, RpcErrorData, ShareConfigDto, ShareConvertToCloudParams,
-    ShareCreateParams, ShareDiagnosticsDto, ShareDiagnosticsParams, ShareDismissPendingParams,
-    ShareDto, ShareIdParams, ShareLocalConfigDto, ShareLogsDto, ShareLogsParams,
-    ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiveRecordsParams,
-    ShareReceiveResultDto, ShareResolveDto, ShareResolveParams, ShareSessionKillParams,
-    ShareStopProvidingParams, ShareSwitchToBridgeParams, ShareTaskFactsDto, ShareUpdateParams,
-    method,
+    ApplicationErrorCode, RpcErrorData, ShareAppealParams, ShareConfigDto,
+    ShareConvertToCloudParams, ShareCreateParams, ShareDiagnosticsDto, ShareDiagnosticsParams,
+    ShareDismissPendingParams, ShareDto, ShareIdParams, ShareLocalConfigDto, ShareLogsDto,
+    ShareLogsParams, ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveRecordsPage,
+    ShareReceiveRecordsParams, ShareReceiveResultDto, ShareReportParams, ShareResolveDto,
+    ShareResolveParams, ShareSessionKillParams, ShareStopProvidingParams,
+    ShareSwitchToBridgeParams, ShareTaskFactsDto, ShareUpdateParams, ShareUsageDto, method,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -189,5 +189,20 @@ impl ShareApi {
                 session_id: session_id.to_owned(),
             },
         )
+    }
+
+    /// 立即向云端取最新额度与贡献并写入 `ShareStateDto.usage`；未登录返回 `None`。
+    pub fn usage_refresh(&self) -> PortFuture<Option<ShareUsageDto>> {
+        self.invoke_empty(method::AGENT_SHARE_USAGE_REFRESH)
+    }
+
+    /// 举报一份已领取的分享；重复举报静默成功。
+    pub fn report(&self, params: &ShareReportParams) -> PortFuture<serde_json::Value> {
+        self.invoke(method::AGENT_SHARE_REPORT, params)
+    }
+
+    /// 对已下架的分享申诉；返回带申诉记录的分享。
+    pub fn appeal(&self, params: &ShareAppealParams) -> PortFuture<ShareDto> {
+        self.invoke(method::AGENT_SHARE_APPEAL, params)
     }
 }

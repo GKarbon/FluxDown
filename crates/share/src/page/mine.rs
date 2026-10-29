@@ -24,13 +24,14 @@ use super::{
 };
 use crate::{
     actions::notify_error,
+    appeal::open_appeal_dialog,
     cloud_ui::{confirm_delete_cloud_copy, open_convert_dialog},
     errors::error_text,
     manage_ui::{
         body_text, chip, clipped, empty_state, meta_text, text, text_with, tooltip_builder,
     },
     model::{
-        PanelTarget, ShareAction, batch_actions, claimed_summary,
+        AppealUi, PanelTarget, ShareAction, appeal_state, batch_actions, claimed_summary,
         cloud::{CloudPhase, cloud_actions, method_label},
         format_bytes, format_datetime, format_percent, is_editable, ordered_shares, share_headline,
         share_status_key, source_missing_badge,
@@ -42,6 +43,7 @@ pub(super) fn share_status_tone(status: ShareStatus, cx: &App) -> Option<Hsla> {
     let colors = active_theme(cx).extended().colors;
     match status {
         ShareStatus::Active => Some(colors.success),
+        ShareStatus::Takedown => Some(active_theme(cx).tokens().colors.destructive),
         ShareStatus::Expired | ShareStatus::Stopped | ShareStatus::Unknown => None,
     }
 }
@@ -438,7 +440,13 @@ impl ShareView {
                 share_status_tone(share.status, cx),
             )
         };
-        let status = chip(row_id("status"), status_label, status_tone, cx);
+        let mut status = chip(row_id("status"), status_label, status_tone, cx);
+        if share.status == ShareStatus::Takedown
+            && let Some(reason) = share.takedown_reason.as_deref().filter(|r| !r.is_empty())
+        {
+            let tip = text_with(translator, "shareTakedownReason", &[("reason", reason)]);
+            status = status.tooltip(tooltip_builder(tip));
+        }
 
         let icon_size = theme.extended().icon.md;
         let copy_label = text(translator, "shareCopyLink");
@@ -549,20 +557,6 @@ impl ShareView {
                 stop_button,
             )
         } else {
-            let start_button = icon_button(
-                row_id("start"),
-                start_label,
-                Icon::new(FluxIcon::Play).size(icon_size),
-                ButtonVariant::Ghost,
-                cx,
-            )
-            .tooltip(tooltip_builder(start_tip))
-            .disabled(!can_start || stale || busy)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.run_action(ShareAction::Start, vec![start_id.clone()], window, cx);
-            }))
-            .into_any_element();
             let delete_button = icon_button(
                 row_id("delete"),
                 delete_label.clone(),
@@ -579,7 +573,71 @@ impl ShareView {
                 this.confirm_delete(vec![delete_id.clone()], window, cx);
             }))
             .into_any_element();
-            (start_button, delete_button)
+            let first = match appeal_state(&share) {
+                AppealUi::CanAppeal => {
+                    let label = text(translator, "shareAppeal");
+                    let (hub_entity, id) = (self.hub.clone(), share.id.clone());
+                    icon_button(
+                        row_id("appeal"),
+                        label.clone(),
+                        Icon::new(FluxIcon::FileText).size(icon_size),
+                        ButtonVariant::Ghost,
+                        cx,
+                    )
+                    .tooltip(tooltip_builder(label))
+                    .disabled(stale || busy)
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        open_appeal_dialog(&hub_entity, id.clone(), window, cx);
+                    })
+                    .into_any_element()
+                }
+                // 处理中 / 未通过：弱化的状态图标（位宽只容得下一个按钮，全文在悬浮提示里）。
+                state @ (AppealUi::Pending | AppealUi::Rejected) => {
+                    let (key, icon) = if state == AppealUi::Pending {
+                        ("shareAppealPending", FluxIcon::Clock)
+                    } else {
+                        ("shareAppealRejected", FluxIcon::CircleAlert)
+                    };
+                    let label = text(translator, key);
+                    h_flex()
+                        .id(row_id("appeal-state"))
+                        .w(theme.density().control)
+                        .flex_none()
+                        .justify_center()
+                        .child(
+                            Icon::new(icon)
+                                .size(icon_size)
+                                .text_color(theme.extended().colors.text_tertiary),
+                        )
+                        .tooltip(tooltip_builder(label))
+                        .into_any_element()
+                }
+                AppealUi::None => {
+                    if share.status == ShareStatus::Takedown {
+                        div()
+                            .w(theme.density().control)
+                            .flex_none()
+                            .into_any_element()
+                    } else {
+                        icon_button(
+                            row_id("start"),
+                            start_label,
+                            Icon::new(FluxIcon::Play).size(icon_size),
+                            ButtonVariant::Ghost,
+                            cx,
+                        )
+                        .tooltip(tooltip_builder(start_tip))
+                        .disabled(!can_start || stale || busy)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.run_action(ShareAction::Start, vec![start_id.clone()], window, cx);
+                        }))
+                        .into_any_element()
+                    }
+                }
+            };
+            (first, delete_button)
         };
 
         let group = SharedString::from(format!("share-mine-group-{index}"));

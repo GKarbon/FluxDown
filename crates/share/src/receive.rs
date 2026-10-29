@@ -38,6 +38,7 @@ use crate::{
             single_line, source_lines,
         },
     },
+    report::open_report_dialog,
     window_ui::{self, ellipsized, text},
 };
 
@@ -944,42 +945,55 @@ impl ShareReceiveView {
                 ),
             )
             .child(
-                window_ui::footer_frame(cx).child(div()).child(
-                    h_flex()
-                        .gap(tokens.spacing.sm)
-                        .child(
-                            Button::new("share-receive-cancel")
-                                .outline()
-                                .label(text(translator, "cancel"))
-                                .control(cx)
-                                .disabled(busy && self.pending_id.is_none())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.cancel(window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("share-receive-start")
-                                .primary()
-                                .label(text(
-                                    translator,
-                                    if retry {
-                                        "shareRetry"
-                                    } else {
-                                        "shareStartReceive"
-                                    },
-                                ))
-                                .control(cx)
-                                .busy(busy)
-                                .disabled(!can_start && !(retry && !busy && !stale))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.error.is_some() {
-                                        this.retry(cx);
-                                    } else {
-                                        this.start_receive(cx);
-                                    }
-                                })),
-                        ),
-                ),
+                window_ui::footer_frame(cx)
+                    .child({
+                        let hub = self.hub.clone();
+                        let share_id = preview.share_id.clone();
+                        Button::new("share-receive-report")
+                            .ghost()
+                            .label(text(translator, "shareReport"))
+                            .control(cx)
+                            .disabled(stale || share_id.is_empty())
+                            .on_click(move |_, window, cx| {
+                                open_report_dialog(&hub, share_id.clone(), window, cx);
+                            })
+                    })
+                    .child(
+                        h_flex()
+                            .gap(tokens.spacing.sm)
+                            .child(
+                                Button::new("share-receive-cancel")
+                                    .outline()
+                                    .label(text(translator, "cancel"))
+                                    .control(cx)
+                                    .disabled(busy && self.pending_id.is_none())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("share-receive-start")
+                                    .primary()
+                                    .label(text(
+                                        translator,
+                                        if retry {
+                                            "shareRetry"
+                                        } else {
+                                            "shareStartReceive"
+                                        },
+                                    ))
+                                    .control(cx)
+                                    .busy(busy)
+                                    .disabled(!can_start && !(retry && !busy && !stale))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.error.is_some() {
+                                            this.retry(cx);
+                                        } else {
+                                            this.start_receive(cx);
+                                        }
+                                    })),
+                            ),
+                    ),
             )
     }
 }

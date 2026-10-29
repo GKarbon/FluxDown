@@ -112,6 +112,7 @@ impl Inner {
                     relay_stuck: source.is_none()
                         && session.is_some_and(|(_, m)| m.relay_stuck && !m.ended),
                     swarm_peers,
+                    swarm_block: self.swarm_blocks.get(&task.share_id).copied(),
                 };
                 (task_id.clone(), facts)
             })
@@ -139,6 +140,8 @@ impl Inner {
                 .and_then(|id| self.resolves.get(id))
                 .map(|p| p.dto.clone()),
             hashing: self.hashing.values().cloned().collect(),
+            usage: self.usage.clone().map(Box::new),
+            usage_error: self.usage_error,
         }
     }
 }
@@ -224,8 +227,11 @@ impl ShareService {
                 };
             }
         }
-        self.with(|i| i.config.as_ref().map(|c| c.cfg.clone()))
-            .ok_or_else(unavailable)
+        let cfg = self
+            .with(|i| i.config.as_ref().map(|c| c.cfg.clone()))
+            .ok_or_else(unavailable)?;
+        self.apply_swarm_policy();
+        Ok(cfg)
     }
 
     /// 用户发起分享 / 接收时取最新策略（ETag 条件请求，未变时 304）：网络策略（中继、pkarr、DNS）
@@ -236,6 +242,52 @@ impl ShareService {
             self.refresh_endpoint().await;
         }
         Ok(cfg)
+    }
+
+    /// 把「云端下发的保留槽位 / 缺省每日上限」与本机设置合成后交给端点（无端点时什么也不做）。
+    pub(super) fn apply_swarm_policy(&self) {
+        let applied = self.with(|i| {
+            let endpoint = i.endpoint.clone()?;
+            let policy = i.config.as_ref().map(|c| c.cfg.swarm).unwrap_or_default();
+            let cap = i
+                .local
+                .provide_daily_cap_bytes
+                .unwrap_or(policy.provide_daily_cap_default_bytes);
+            let offset = i.local.provide_day_offset_secs.unwrap_or(0);
+            Some((endpoint, policy.priority_reserved_slots, cap, offset))
+        });
+        if let Some((endpoint, slots, cap, offset)) = applied {
+            endpoint.set_swarm_policy(
+                usize::try_from(slots).unwrap_or(usize::MAX),
+                cap,
+                i64::from(offset),
+            );
+        }
+    }
+
+    /// 把当日共享上传量落盘（仅在值变化时写；由登记周期与端点关闭前调用）。
+    pub(super) async fn persist_daily(&self) {
+        if let Some(endpoint) = self.with(|i| i.endpoint.clone()) {
+            self.persist_daily_of(&endpoint).await;
+        }
+    }
+
+    pub(super) async fn persist_daily_of(&self, endpoint: &ShareEndpoint) {
+        let (day, used) = endpoint.swarm_daily_usage();
+        let current = super::store::ProvideDaily { day, used };
+        let changed = self.with(|i| match i.daily_saved {
+            Some(saved) => saved != current,
+            None => used > 0,
+        });
+        if !changed {
+            return;
+        }
+        match self.store.save_daily(&current).await {
+            Ok(()) => self.with(|i| i.daily_saved = Some(current)),
+            Err(error) => {
+                tracing::warn!(error = %error, "could not persist the daily provide usage");
+            }
+        }
     }
 
     /// 票据公钥环：为空或策略变化后拉取（`GET /share/keys`，公开）。
@@ -297,6 +349,11 @@ impl ShareService {
             }
         });
         if inserted {
+            self.apply_swarm_policy();
+            if let Some(daily) = self.store.load_daily().await {
+                current.restore_swarm_daily(daily.day, daily.used);
+                self.with(|i| i.daily_saved = Some(daily));
+            }
             self.spawn_net_watch(&current);
         }
         Ok(current)
@@ -371,6 +428,7 @@ impl ShareService {
         if let Some(old) = dirty_endpoint
             && !receiving
         {
+            self.persist_daily().await;
             old.shutdown().await;
             self.with(|i| {
                 i.endpoint = None;
@@ -394,6 +452,7 @@ impl ShareService {
         } else if let Some(endpoint) = self.with(|i| i.endpoint.clone())
             && endpoint.is_bound()
         {
+            self.persist_daily().await;
             endpoint.shutdown().await;
         }
     }
@@ -487,7 +546,9 @@ impl ShareService {
             }
             self.sync_shares().await;
             self.wake_uploads();
+            self.resume_login_lookups();
         }
+        self.refresh_usage().await;
     }
 
     // ───────────── 分享登记与云端同步 ─────────────
@@ -770,6 +831,7 @@ impl ShareService {
                 }
             }
             "share.changed" => self.sync_shares().await,
+            "share.usage" => self.refresh_usage().await,
             _ => {}
         }
     }
@@ -844,4 +906,10 @@ pub(super) fn apply_cloud(dto: &mut ShareDto, cloud: &CloudShare) {
     dto.cloud_bytes = u64::try_from(cloud.cloud_bytes).unwrap_or(0);
     dto.swarm = cloud.swarm;
     dto.swarm_locked = cloud.swarm_locked;
+    dto.takedown_reason = if cloud.status() == ShareStatus::Takedown {
+        cloud.takedown_reason.clone()
+    } else {
+        None
+    };
+    dto.appeal.clone_from(&cloud.appeal);
 }

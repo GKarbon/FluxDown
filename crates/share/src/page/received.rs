@@ -30,6 +30,7 @@ use crate::{
         format_bytes, format_datetime, provide_state_key, receive_status_key,
         records::ReceivedFeed, refresh::GateAction,
     },
+    report::open_report_dialog,
 };
 
 pub(super) fn receive_status_tone(status: ShareReceiveStatus, cx: &App) -> Hsla {
@@ -304,6 +305,25 @@ impl ShareView {
                 crate::actions::stop_providing(&hub, &record_id, window, cx);
             })
         });
+        let report_button = record.share_id.clone().map(|share_id| {
+            let label = text(translator, "shareReport");
+            let icon_size = active_theme(cx).extended().icon.md;
+            let hub = self.hub.clone();
+            icon_button(
+                row_id("report"),
+                label.clone(),
+                Icon::new(FluxIcon::Flag)
+                    .size(icon_size)
+                    .text_color(active_theme(cx).extended().colors.text_tertiary),
+                ButtonVariant::Ghost,
+                cx,
+            )
+            .tooltip(tooltip_builder(label))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                open_report_dialog(&hub, share_id.clone(), window, cx);
+            })
+        });
         h_flex()
             .w_full()
             .h(row_height(cx))
@@ -337,7 +357,8 @@ impl ShareView {
                     .min_w_0()
                     .gap(tokens.spacing.xxs)
                     .children(provide_chip)
-                    .children(stop_button),
+                    .children(stop_button)
+                    .children(report_button),
             )
             .child(div().w(tokens.spacing.xxs).flex_none())
     }

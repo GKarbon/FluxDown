@@ -64,6 +64,18 @@ impl DownloadView {
         }
     }
 
+    /// 任务行角标上的「额度已用完 / 需登录」chip：打开管理页额度页签。
+    pub(crate) fn share_open_usage(
+        &self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(open) = self.host.share_open_usage.clone() {
+            open(task_id, window, cx);
+        }
+    }
+
     /// 图标型「分享」按钮：隐藏时返回 `None`；禁用时保留悬浮提示并说明原因。
     pub(crate) fn share_button(
         &self,

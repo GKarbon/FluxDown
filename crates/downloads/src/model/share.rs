@@ -83,6 +83,8 @@ pub(crate) struct ShareHostCaps {
     pub(crate) send: bool,
     /// 「切换桥接」。
     pub(crate) switch_bridge: bool,
+    /// 「额度与贡献」：打开管理页额度页签。
+    pub(crate) open_usage: bool,
 }
 
 /// 分享入口被禁用的原因（决定悬浮提示）。

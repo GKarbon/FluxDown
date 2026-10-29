@@ -1,19 +1,38 @@
 // 「我的分享」：文件、方式、有效期、领取次数、最近访问、状态；复制链接、二维码 / 详情（分享面板）、停止 / 开始 / 删除。
 // 支持多选批量开始 / 停止 / 删除（逐项调用单项 RPC，汇总失败）。桌面为表格，窄屏为卡片。
 
-import { Copy, Play, QrCode, Share2, Square, Trash2 } from 'lucide-react'
-import { useState } from 'react'
-import { useT } from '../../i18n'
-import type { TFunction } from '../../i18n'
-import { copyText } from '../../lib/copy'
-import { rpc } from '../../lib/rpc'
-import type { ShareDto } from '../../lib/rpc'
-import { Badge, Button, Checkbox, EmptyState, Tooltip, confirmDialog, toast, useIsMobile } from '../../ui'
-import { accountErrorKey } from '../settings/sections/account/errorText'
-import { formatBytes } from '../downloads/dialogs/utils'
-import { useNowSeconds } from '../rss/useNow'
+import {
+  Copy,
+  Gavel,
+  Play,
+  QrCode,
+  Share2,
+  Square,
+  Trash2,
+} from "lucide-react";
+import { useState } from "react";
+import { useT } from "../../i18n";
+import type { TFunction } from "../../i18n";
+import { copyText } from "../../lib/copy";
+import { rpc } from "../../lib/rpc";
+import type { ShareDto } from "../../lib/rpc";
+import {
+  Badge,
+  Button,
+  Checkbox,
+  EmptyState,
+  Tooltip,
+  confirmDialog,
+  toast,
+  useIsMobile,
+} from "../../ui";
+import { accountErrorText } from "../settings/sections/account/errorText";
+import { formatBytes } from "../downloads/dialogs/utils";
+import { useNowSeconds } from "../rss/useNow";
 import {
   SHARE_STATUS_KEYS,
+  appealState,
+  shareActionApplies,
   agoLabel,
   canStartShare,
   canStopShare,
@@ -25,84 +44,98 @@ import {
   shareDisplayStatus,
   shareTitleText,
   sortShares,
-} from './model'
-import type { ShareDisplayStatus } from './model'
-import { CloudRowActions, CloudStateBadge } from './CloudStorage'
-import { useShares } from './state'
-import { openShareDetail } from './store'
+} from "./model";
+import type { ShareDisplayStatus } from "./model";
+import { CloudRowActions, CloudStateBadge } from "./CloudStorage";
+import { AppealDialog } from "./AppealDialog";
+import { useShares } from "./state";
+import { openShareDetail } from "./store";
 
-type ShareOp = 'start' | 'stop' | 'delete'
+type ShareOp = "start" | "stop" | "delete";
 
 const SHARE_OPS: Readonly<Record<ShareOp, (id: string) => Promise<unknown>>> = {
   start: (id) => rpc.agent.share.resume({ id }),
   stop: (id) => rpc.agent.share.stop({ id }),
   delete: (id) => rpc.agent.share.delete({ id }),
-}
+};
 
 /** 逐项（串行）执行单项 RPC；有失败时 toast 提示：单项直接给原因，多项汇总失败数与首个原因。 */
-async function runShareOp(t: TFunction, op: ShareOp, shares: readonly ShareDto[]): Promise<void> {
-  let failed = 0
-  let firstError: unknown
+async function runShareOp(
+  t: TFunction,
+  op: ShareOp,
+  shares: readonly ShareDto[],
+): Promise<void> {
+  let failed = 0;
+  let firstError: unknown;
   for (const share of shares) {
     try {
-      await SHARE_OPS[op](share.id)
+      await SHARE_OPS[op](share.id);
     } catch (error) {
-      if (failed === 0) firstError = error
-      failed += 1
+      if (failed === 0) firstError = error;
+      failed += 1;
     }
   }
-  if (failed === 0) return
-  const reason = t(accountErrorKey(firstError))
-  toast.error(shares.length === 1 ? reason : t('shareBatchPartialFailed', { failed, reason }))
+  if (failed === 0) return;
+  const reason = accountErrorText(t, firstError);
+  toast.error(
+    shares.length === 1
+      ? reason
+      : t("shareBatchPartialFailed", { failed, reason }),
+  );
 }
 
 /** 删除前确认（单项与批量共用）。 */
 function confirmDelete(t: TFunction, count: number): Promise<boolean> {
   return confirmDialog({
-    title: t('shareDeleteConfirmTitle'),
-    description: t('shareDeleteConfirmBody', { n: count }),
-    okLabel: t('shareActionDelete'),
-    intent: 'destructive',
-  })
+    title: t("shareDeleteConfirmTitle"),
+    description: t("shareDeleteConfirmBody", { n: count }),
+    okLabel: t("shareActionDelete"),
+    intent: "destructive",
+  });
 }
 
 export function MyShares() {
-  const t = useT()
-  const mobile = useIsMobile()
-  const shares = useShares()
-  const nowMs = useNowSeconds() * 1000
-  const ordered = sortShares(shares, nowMs)
-  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set())
-  const [batchBusy, setBatchBusy] = useState(false)
+  const t = useT();
+  const mobile = useIsMobile();
+  const shares = useShares();
+  const nowMs = useNowSeconds() * 1000;
+  const ordered = sortShares(shares, nowMs);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const [batchBusy, setBatchBusy] = useState(false);
 
   if (ordered.length === 0) {
-    return <EmptyState icon={Share2} title={t('shareMineEmpty')} />
+    return <EmptyState icon={Share2} title={t("shareMineEmpty")} />;
   }
 
   // 列表经 shareChanged 刷新后，已不存在的分享不再计入选中。
-  const alive = pruneSelection(selectedIds, ordered)
-  const selected = ordered.filter((share) => alive.has(share.id))
-  const anySelected = selected.length > 0
-  const allState = selectAllState(selected.length, ordered.length)
+  const alive = pruneSelection(selectedIds, ordered);
+  const selected = ordered.filter((share) => alive.has(share.id));
+  const anySelected = selected.length > 0;
+  const allState = selectAllState(selected.length, ordered.length);
 
   const toggle = (id: string) => {
-    const next = new Set(alive)
-    if (!next.delete(id)) next.add(id)
-    setSelectedIds(next)
-  }
-  const toggleAll = () => setSelectedIds(allState === true ? new Set() : new Set(ordered.map((share) => share.id)))
+    const next = new Set(alive);
+    if (!next.delete(id)) next.add(id);
+    setSelectedIds(next);
+  };
+  const toggleAll = () =>
+    setSelectedIds(
+      allState === true ? new Set() : new Set(ordered.map((share) => share.id)),
+    );
 
   const runBatch = async (op: ShareOp, targets: readonly ShareDto[]) => {
-    if (targets.length === 0) return
-    if (op === 'delete' && !(await confirmDelete(t, targets.length))) return
-    setBatchBusy(true)
+    if (targets.length === 0) return;
+    if (op === "delete" && !(await confirmDelete(t, targets.length))) return;
+    setBatchBusy(true);
     try {
-      await runShareOp(t, op, targets)
+      await runShareOp(t, op, targets);
     } finally {
-      setBatchBusy(false)
+      setBatchBusy(false);
     }
-    if (op === 'delete') setSelectedIds(new Set())
-  }
+    if (op === "delete") setSelectedIds(new Set());
+  };
 
   const bar = anySelected ? (
     <BatchBar
@@ -112,14 +145,20 @@ export function MyShares() {
       selectAll={mobile ? { state: allState, onToggle: toggleAll } : undefined}
       onRun={(op, targets) => void runBatch(op, targets)}
     />
-  ) : null
+  ) : null;
 
   return mobile ? (
     <div className="flex flex-col gap-2">
       {bar}
       <ul className="flex flex-col gap-2">
         {ordered.map((share) => (
-          <ShareCard key={share.id} share={share} nowMs={nowMs} selected={alive.has(share.id)} onToggle={() => toggle(share.id)} />
+          <ShareCard
+            key={share.id}
+            share={share}
+            nowMs={nowMs}
+            selected={alive.has(share.id)}
+            onToggle={() => toggle(share.id)}
+          />
         ))}
       </ul>
     </div>
@@ -131,16 +170,28 @@ export function MyShares() {
           <thead className="bg-chrome text-xs text-text-tertiary">
             <tr className="group/head">
               <th className="w-9 px-2 py-2 font-normal">
-                <div className={anySelected ? 'flex' : 'flex opacity-0 focus-within:opacity-100 group-hover/head:opacity-100'}>
-                  <Checkbox checked={allState} onCheckedChange={toggleAll} aria-label={t('shareSelectAll')} />
+                <div
+                  className={
+                    anySelected
+                      ? "flex"
+                      : "flex opacity-0 focus-within:opacity-100 group-hover/head:opacity-100"
+                  }
+                >
+                  <Checkbox
+                    checked={allState}
+                    onCheckedChange={toggleAll}
+                    aria-label={t("shareSelectAll")}
+                  />
                 </div>
               </th>
-              <th className="px-3 py-2 font-normal">{t('shareColFile')}</th>
-              <th className="px-3 py-2 font-normal">{t('shareColMethod')}</th>
-              <th className="px-3 py-2 font-normal">{t('shareColExpiry')}</th>
-              <th className="px-3 py-2 font-normal">{t('shareColClaims')}</th>
-              <th className="px-3 py-2 font-normal">{t('shareColLastAccess')}</th>
-              <th className="px-3 py-2 font-normal">{t('shareColStatus')}</th>
+              <th className="px-3 py-2 font-normal">{t("shareColFile")}</th>
+              <th className="px-3 py-2 font-normal">{t("shareColMethod")}</th>
+              <th className="px-3 py-2 font-normal">{t("shareColExpiry")}</th>
+              <th className="px-3 py-2 font-normal">{t("shareColClaims")}</th>
+              <th className="px-3 py-2 font-normal">
+                {t("shareColLastAccess")}
+              </th>
+              <th className="px-3 py-2 font-normal">{t("shareColStatus")}</th>
               <th className="px-3 py-2" />
             </tr>
           </thead>
@@ -159,7 +210,7 @@ export function MyShares() {
         </table>
       </div>
     </div>
-  )
+  );
 }
 
 /** 批量操作条：「已选 n 项｜开始分享｜停止分享｜删除」；开始 / 停止只对适用的项执行。 */
@@ -170,135 +221,237 @@ function BatchBar({
   selectAll,
   onRun,
 }: {
-  count: number
-  selected: readonly ShareDto[]
-  busy: boolean
-  selectAll?: { state: boolean | 'indeterminate'; onToggle: () => void }
-  onRun: (op: ShareOp, targets: readonly ShareDto[]) => void
+  count: number;
+  selected: readonly ShareDto[];
+  busy: boolean;
+  selectAll?: { state: boolean | "indeterminate"; onToggle: () => void };
+  onRun: (op: ShareOp, targets: readonly ShareDto[]) => void;
 }) {
-  const t = useT()
-  const plan = planShareBatch(selected)
+  const t = useT();
+  const plan = planShareBatch(selected);
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border border-hairline bg-chrome px-3 py-1.5 text-sm">
-      {selectAll ? <Checkbox checked={selectAll.state} onCheckedChange={selectAll.onToggle} aria-label={t('shareSelectAll')} /> : null}
-      <span className="tabular mr-auto text-muted-foreground">{t('shareSelectedCount', { n: count })}</span>
-      <Button variant="outline" icon={Play} disabled={busy || plan.start.length === 0} onClick={() => onRun('start', plan.start)}>
-        {t('shareBatchStart')}
+      {selectAll ? (
+        <Checkbox
+          checked={selectAll.state}
+          onCheckedChange={selectAll.onToggle}
+          aria-label={t("shareSelectAll")}
+        />
+      ) : null}
+      <span className="tabular mr-auto text-muted-foreground">
+        {t("shareSelectedCount", { n: count })}
+      </span>
+      <Button
+        variant="outline"
+        icon={Play}
+        disabled={busy || plan.start.length === 0}
+        onClick={() => onRun("start", plan.start)}
+      >
+        {t("shareBatchStart")}
       </Button>
-      <Button variant="outline" icon={Square} disabled={busy || plan.stop.length === 0} onClick={() => onRun('stop', plan.stop)}>
-        {t('shareBatchStop')}
+      <Button
+        variant="outline"
+        icon={Square}
+        disabled={busy || plan.stop.length === 0}
+        onClick={() => onRun("stop", plan.stop)}
+      >
+        {t("shareBatchStop")}
       </Button>
-      <Button variant="outline" icon={Trash2} className="text-destructive" disabled={busy} onClick={() => onRun('delete', plan.remove)}>
-        {t('shareBatchDelete')}
+      <Button
+        variant="outline"
+        icon={Trash2}
+        className="text-destructive"
+        disabled={busy}
+        onClick={() => onRun("delete", plan.remove)}
+      >
+        {t("shareBatchDelete")}
       </Button>
     </div>
-  )
+  );
 }
 
 function claimsText(t: TFunction, share: ShareDto): string {
   return share.maxClaims > 0
-    ? t('shareClaimedOf', { count: share.claimCount, max: share.maxClaims })
-    : t('shareClaimedCount', { count: share.claimCount })
+    ? t("shareClaimedOf", { count: share.claimCount, max: share.maxClaims })
+    : t("shareClaimedCount", { count: share.claimCount });
 }
 
 /** 状态徽标：本机源文件缺失 / 被修改（且无就绪云端副本）时追加「文件缺失」。 */
-function StatusBadges({ share, status }: { share: ShareDto; status: ShareDisplayStatus }) {
-  const t = useT()
+function StatusBadges({
+  share,
+  status,
+}: {
+  share: ShareDto;
+  status: ShareDisplayStatus;
+}) {
+  const t = useT();
   return (
     <>
-      <Badge tone={status === 'active' ? 'success' : 'neutral'}>{t(SHARE_STATUS_KEYS[status])}</Badge>
-      {isSourceMissing(share) ? <Badge tone="destructive">{t('shareStatusSourceMissing')}</Badge> : null}
+      {status === "takedown" ? (
+        <Tooltip
+          content={t("shareTakedownReason", {
+            reason: share.takedownReason ?? "",
+          })}
+        >
+          <Badge tone="destructive">{t(SHARE_STATUS_KEYS[status])}</Badge>
+        </Tooltip>
+      ) : (
+        <Badge tone={status === "active" ? "success" : "neutral"}>
+          {t(SHARE_STATUS_KEYS[status])}
+        </Badge>
+      )}
+      {isSourceMissing(share) ? (
+        <Badge tone="destructive">{t("shareStatusSourceMissing")}</Badge>
+      ) : null}
       <CloudStateBadge share={share} />
     </>
-  )
+  );
 }
 
 /** 复制 / 二维码 + 停止（有效）或 开始 / 删除（已停止 / 已过期）行内操作。 */
-function ShareActions({ share, status, nowMs }: { share: ShareDto; status: ShareDisplayStatus; nowMs: number }) {
-  const t = useT()
-  const [pending, setPending] = useState<ShareOp | null>(null)
-  const live = status === 'active'
-  const ended = !live && !canStopShare(share)
+function ShareActions({
+  share,
+  status,
+  nowMs,
+}: {
+  share: ShareDto;
+  status: ShareDisplayStatus;
+  nowMs: number;
+}) {
+  const t = useT();
+  const [pending, setPending] = useState<ShareOp | null>(null);
+  const [appealing, setAppealing] = useState(false);
+  const appeal = appealState(share);
+  const live = status === "active";
+  const ended = !live && !canStopShare(share);
 
   const run = async (op: ShareOp) => {
-    if (op === 'stop') {
-      const ok = await confirmDialog({ title: t('shareStop'), description: t('shareStopConfirm'), okLabel: t('shareStop'), intent: 'destructive' })
-      if (!ok) return
-    } else if (op === 'delete' && !(await confirmDelete(t, 1))) {
-      return
+    if (op === "stop") {
+      const ok = await confirmDialog({
+        title: t("shareStop"),
+        description: t("shareStopConfirm"),
+        okLabel: t("shareStop"),
+        intent: "destructive",
+      });
+      if (!ok) return;
+    } else if (op === "delete" && !(await confirmDelete(t, 1))) {
+      return;
     }
-    setPending(op)
+    setPending(op);
     try {
-      await runShareOp(t, op, [share])
+      await runShareOp(t, op, [share]);
     } finally {
-      setPending(null)
+      setPending(null);
     }
-  }
+  };
 
-  const startable = canStartShare(share)
+  const startable = canStartShare(share);
+  const canStart = shareActionApplies("start", share);
   return (
     <div className="flex shrink-0 items-center justify-end gap-0.5">
-      <Tooltip content={t('shareCopyLink')}>
+      <Tooltip content={t("shareCopyLink")}>
         <Button
           variant="ghost"
           iconOnly
-          aria-label={t('shareCopyLink')}
+          aria-label={t("shareCopyLink")}
           disabled={!live}
           onClick={() => {
-            copyText(share.url)
-            toast.success(t('shareLinkCopied'))
+            copyText(share.url);
+            toast.success(t("shareLinkCopied"));
           }}
         >
           <Copy className="size-4" />
         </Button>
       </Tooltip>
-      <Tooltip content={t('shareShowQr')}>
-        <Button variant="ghost" iconOnly aria-label={t('shareShowQr')} onClick={() => openShareDetail(share.id)}>
+      <Tooltip content={t("shareShowQr")}>
+        <Button
+          variant="ghost"
+          iconOnly
+          aria-label={t("shareShowQr")}
+          onClick={() => openShareDetail(share.id)}
+        >
           <QrCode className="size-4" />
         </Button>
       </Tooltip>
       <CloudRowActions share={share} nowMs={nowMs} />
       {live ? (
-        <Tooltip content={t('shareStop')}>
-          <Button variant="ghost" iconOnly aria-label={t('shareStop')} className="text-destructive" loading={pending === 'stop'} onClick={() => void run('stop')}>
+        <Tooltip content={t("shareStop")}>
+          <Button
+            variant="ghost"
+            iconOnly
+            aria-label={t("shareStop")}
+            className="text-destructive"
+            loading={pending === "stop"}
+            onClick={() => void run("stop")}
+          >
             <Square className="size-4" />
           </Button>
         </Tooltip>
       ) : null}
       {ended ? (
         <>
-          <Tooltip content={startable ? t('shareActionStart') : t('shareStartDisabledMissing')}>
-            {/* 禁用的按钮不触发悬停，tooltip 挂在外层 span 上。 */}
-            <span className="inline-flex">
-              <Button
-                variant="ghost"
-                iconOnly
-                aria-label={t('shareActionStart')}
-                disabled={!startable || pending !== null}
-                loading={pending === 'start'}
-                onClick={() => void run('start')}
-              >
-                <Play className="size-4" />
-              </Button>
-            </span>
-          </Tooltip>
-          <Tooltip content={t('shareActionDelete')}>
+          {canStart ? (
+            <Tooltip
+              content={
+                startable
+                  ? t("shareActionStart")
+                  : t("shareStartDisabledMissing")
+              }
+            >
+              {/* 禁用的按钮不触发悬停，tooltip 挂在外层 span 上。 */}
+              <span className="inline-flex">
+                <Button
+                  variant="ghost"
+                  iconOnly
+                  aria-label={t("shareActionStart")}
+                  disabled={!startable || pending !== null}
+                  loading={pending === "start"}
+                  onClick={() => void run("start")}
+                >
+                  <Play className="size-4" />
+                </Button>
+              </span>
+            </Tooltip>
+          ) : null}
+          <Tooltip content={t("shareActionDelete")}>
             <Button
               variant="ghost"
               iconOnly
-              aria-label={t('shareActionDelete')}
+              aria-label={t("shareActionDelete")}
               className="text-destructive"
               disabled={pending !== null}
-              loading={pending === 'delete'}
-              onClick={() => void run('delete')}
+              loading={pending === "delete"}
+              onClick={() => void run("delete")}
             >
               <Trash2 className="size-4" />
             </Button>
           </Tooltip>
         </>
       ) : null}
+      {appeal === "canAppeal" ? (
+        <Tooltip content={t("shareAppeal")}>
+          <Button
+            variant="ghost"
+            iconOnly
+            aria-label={t("shareAppeal")}
+            onClick={() => setAppealing(true)}
+          >
+            <Gavel className="size-4" />
+          </Button>
+        </Tooltip>
+      ) : null}
+      {appeal === "pending" || appeal === "rejected" ? (
+        <span className="px-1 text-xs text-text-tertiary">
+          {t(
+            appeal === "pending" ? "shareAppealPending" : "shareAppealRejected",
+          )}
+        </span>
+      ) : null}
+      {appealing ? (
+        <AppealDialog shareId={share.id} onClose={() => setAppealing(false)} />
+      ) : null}
     </div>
-  )
+  );
 }
 
 function ShareTableRow({
@@ -308,19 +461,29 @@ function ShareTableRow({
   anySelected,
   onToggle,
 }: {
-  share: ShareDto
-  nowMs: number
-  selected: boolean
-  anySelected: boolean
-  onToggle: () => void
+  share: ShareDto;
+  nowMs: number;
+  selected: boolean;
+  anySelected: boolean;
+  onToggle: () => void;
 }) {
-  const t = useT()
-  const status = shareDisplayStatus(share, nowMs)
+  const t = useT();
+  const status = shareDisplayStatus(share, nowMs);
   return (
     <tr className="group/row border-t border-hairline align-middle">
       <td className="w-9 px-2 py-2">
-        <div className={anySelected ? 'flex' : 'flex opacity-0 focus-within:opacity-100 group-hover/row:opacity-100'}>
-          <Checkbox checked={selected} onCheckedChange={onToggle} aria-label={shareTitleText(t, share)} />
+        <div
+          className={
+            anySelected
+              ? "flex"
+              : "flex opacity-0 focus-within:opacity-100 group-hover/row:opacity-100"
+          }
+        >
+          <Checkbox
+            checked={selected}
+            onCheckedChange={onToggle}
+            aria-label={shareTitleText(t, share)}
+          />
         </div>
       </td>
       <td className="max-w-[320px] px-3 py-2">
@@ -328,14 +491,23 @@ function ShareTableRow({
           {shareTitleText(t, share)}
         </div>
         <div className="tabular text-xs text-text-tertiary">
-          {t('shareFilesCount', { count: share.files.length })} · {formatBytes(share.totalBytes)}
+          {t("shareFilesCount", { count: share.files.length })} ·{" "}
+          {formatBytes(share.totalBytes)}
         </div>
       </td>
-      <td className="px-3 py-2 text-xs text-muted-foreground">{t(share.mode === 'cloud' ? 'shareModeCloud' : 'shareModeLive')}</td>
-      <td className="tabular px-3 py-2 text-xs text-muted-foreground">{dateTimeLabel(share.expiresAt)}</td>
-      <td className="tabular px-3 py-2 text-xs text-muted-foreground">{claimsText(t, share)}</td>
       <td className="px-3 py-2 text-xs text-muted-foreground">
-        {share.lastAccessedAt === null ? t('shareNever') : agoLabel(t, share.lastAccessedAt, nowMs)}
+        {t(share.mode === "cloud" ? "shareModeCloud" : "shareModeLive")}
+      </td>
+      <td className="tabular px-3 py-2 text-xs text-muted-foreground">
+        {dateTimeLabel(share.expiresAt)}
+      </td>
+      <td className="tabular px-3 py-2 text-xs text-muted-foreground">
+        {claimsText(t, share)}
+      </td>
+      <td className="px-3 py-2 text-xs text-muted-foreground">
+        {share.lastAccessedAt === null
+          ? t("shareNever")
+          : agoLabel(t, share.lastAccessedAt, nowMs)}
       </td>
       <td className="px-3 py-2">
         <div className="flex flex-wrap items-center gap-1">
@@ -346,24 +518,42 @@ function ShareTableRow({
         <ShareActions share={share} status={status} nowMs={nowMs} />
       </td>
     </tr>
-  )
+  );
 }
 
-function ShareCard({ share, nowMs, selected, onToggle }: { share: ShareDto; nowMs: number; selected: boolean; onToggle: () => void }) {
-  const t = useT()
-  const status = shareDisplayStatus(share, nowMs)
+function ShareCard({
+  share,
+  nowMs,
+  selected,
+  onToggle,
+}: {
+  share: ShareDto;
+  nowMs: number;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const t = useT();
+  const status = shareDisplayStatus(share, nowMs);
   return (
     <li className="flex min-w-0 flex-col gap-1.5 rounded-md border border-hairline bg-surface p-3">
       <div className="flex min-w-0 items-start gap-2">
         <div className="flex h-control items-center coarse:min-h-touch">
-          <Checkbox checked={selected} onCheckedChange={onToggle} aria-label={shareTitleText(t, share)} />
+          <Checkbox
+            checked={selected}
+            onCheckedChange={onToggle}
+            aria-label={shareTitleText(t, share)}
+          />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="break-words text-sm text-foreground" title={share.title}>
+          <div
+            className="break-words text-sm text-foreground"
+            title={share.title}
+          >
             {shareTitleText(t, share)}
           </div>
           <div className="tabular text-xs text-text-tertiary">
-            {t('shareFilesCount', { count: share.files.length })} · {formatBytes(share.totalBytes)}
+            {t("shareFilesCount", { count: share.files.length })} ·{" "}
+            {formatBytes(share.totalBytes)}
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
@@ -371,14 +561,21 @@ function ShareCard({ share, nowMs, selected, onToggle }: { share: ShareDto; nowM
         </div>
       </div>
       <div className="tabular flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-        <span>{t(share.mode === 'cloud' ? 'shareModeCloud' : 'shareModeLive')}</span>
-        <span>{t('shareExpiresAt', { time: dateTimeLabel(share.expiresAt) })}</span>
+        <span>
+          {t(share.mode === "cloud" ? "shareModeCloud" : "shareModeLive")}
+        </span>
+        <span>
+          {t("shareExpiresAt", { time: dateTimeLabel(share.expiresAt) })}
+        </span>
         <span>{claimsText(t, share)}</span>
         <span>
-          {t('shareColLastAccess')}: {share.lastAccessedAt === null ? t('shareNever') : agoLabel(t, share.lastAccessedAt, nowMs)}
+          {t("shareColLastAccess")}:{" "}
+          {share.lastAccessedAt === null
+            ? t("shareNever")
+            : agoLabel(t, share.lastAccessedAt, nowMs)}
         </span>
       </div>
       <ShareActions share={share} status={status} nowMs={nowMs} />
     </li>
-  )
+  );
 }

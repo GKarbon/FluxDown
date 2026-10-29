@@ -20,7 +20,21 @@ export type ShareMode = 'live' | 'cloud';
 /** 线上字面量 `none` 对应 Rust 的 `Idle`；未知值解码为 `unknown`。 */
 export type ShareCloudState = 'none' | 'uploading' | 'ready' | 'deleted' | 'unknown';
 export type ShareUploadStatus = 'uploading' | 'paused' | 'failed';
-export type ShareStatus = 'active' | 'expired' | 'stopped' | 'unknown';
+export type ShareStatus = 'active' | 'expired' | 'stopped' | 'takedown' | 'unknown';
+export type ShareAppealStatus = 'pending' | 'approved' | 'rejected' | 'unknown';
+/** 举报原因；agent 映射为规范中文串提交云端。 */
+export type ShareReportReason = 'copyright' | 'porn' | 'illegal' | 'malware' | 'other';
+/** 举报原因的固定展示顺序。 */
+export const SHARE_REPORT_REASONS: readonly ShareReportReason[] = ['copyright', 'porn', 'illegal', 'malware', 'other'];
+
+/** 下架申诉（每个被下架的分享可申诉一次）。 */
+export interface ShareAppealDto {
+  status: ShareAppealStatus;
+  /** RFC 3339。 */
+  createdAt: string;
+  handledAt?: string | null;
+  adminNote?: string | null;
+}
 export type ShareSessionRole = 'sender' | 'receiver' | 'swarm';
 export type ShareReceiveStatus = 'active' | 'completed' | 'failed';
 
@@ -77,6 +91,10 @@ export interface ShareDto {
   swarm?: boolean;
   /** 管理员已关闭并锁定该分享的共享：此时 `swarm` 恒为 false，且不能再打开。 */
   swarmLocked?: boolean;
+  /** 下架原因；仅 `status = takedown` 时出现。 */
+  takedownReason?: string | null;
+  /** 下架申诉；未申诉时缺省。 */
+  appeal?: ShareAppealDto | null;
 }
 
 /** 云端暂存上传进度。 */
@@ -100,6 +118,8 @@ export interface ShareRelayDto {
   region: string;
 }
 
+export type ShareSwarmBlock = 'quotaExhausted' | 'loginRequired' | 'unknown';
+
 export interface SharePolicySummaryDto {
   enabled: boolean;
   guestReceive: boolean;
@@ -113,6 +133,10 @@ export interface SharePolicySummaryDto {
   cloudEnabled: boolean;
   relays: ShareRelayDto[];
   holePunchHintSecs: number;
+  /** 提供方为优先请求保留的连接数。 */
+  swarmPriorityReservedSlots?: number;
+  /** 云端下发的每日共享上传上限缺省值（字节，0 = 不限）。 */
+  provideDailyCapDefaultBytes?: number;
 }
 
 /** 本机FluxMesh设置；`agent.share.setLocalConfig` 整体替换。 */
@@ -134,6 +158,10 @@ export interface ShareLocalConfigDto {
   defaultSwarm?: boolean | null;
   /** null = 开（默认）；false = 接收的文件不参与共享共享。 */
   autoProvide?: boolean | null;
+  /** null = 跟随云端缺省；0 = 不限；n = 每日共享上传上限（字节）。 */
+  provideDailyCapBytes?: number | null;
+  /** 本地时区偏移（秒），用于划分「当日」；缺省按 UTC。 */
+  provideDayOffsetSecs?: number | null;
 }
 
 export interface ShareHomeRelayDto {
@@ -165,6 +193,8 @@ export interface ShareTaskFactsDto {
   relayStuck: boolean;
   /** 当前可用的共享对端数。 */
   swarmPeers?: number;
+  /** 共享加速被云端拒绝的原因；null / 缺省 = 未被拒绝。 */
+  swarmBlock?: ShareSwarmBlock | null;
 }
 
 /** 创建分享时正在做块哈希的任务（`agent.share.create` 返回前出现，完成后移除）。 */
@@ -189,6 +219,73 @@ export interface ShareReceiveRecordDto {
   provideState?: ShareProvideState;
 }
 
+/** 展示字节封顶（1 PiB，与云端 `DISPLAY_BYTES_CAP` 一致）。 */
+export const DISPLAY_BYTES_CAP = 2 ** 50;
+
+/** 流量种类；未知值 Rust 端解析为 `unknown`。 */
+export type ShareTrafficKind = 'swarm' | 'download' | 'upload' | 'unknown';
+/** 额度来源；未知值解析为 `unknown`。 */
+export type ShareGrantSource = 'pack' | 'rollover' | 'contribution' | 'admin' | 'free' | 'unknown';
+
+export interface ShareUsageEnforcedDto {
+  traffic: boolean;
+  swarm: boolean;
+}
+
+export interface ShareKindUsageDto {
+  kind: ShareTrafficKind;
+  /** 月额度为 0（不限）。 */
+  unlimited: boolean;
+  monthlyAllowance: number;
+  usedThisMonth: number;
+  /** 剩余（本月赠送剩余 + 有效 grant 余额 − 预占），下限 0。 */
+  remaining: number;
+  reserved: number;
+}
+
+export interface ShareGrantDto {
+  source: ShareGrantSource;
+  kind: ShareTrafficKind;
+  bytes: number;
+  usedBytes: number;
+  /** RFC 3339；`null` 长期有效。 */
+  expiresAt: string | null;
+}
+
+export interface ShareEarnDto {
+  kind: ShareTrafficKind;
+  permille: number;
+  earnedThisMonth: number;
+  /** 0 = 不限。 */
+  capBytes: number;
+  validMonths: number;
+}
+
+export interface ShareContributionDto {
+  monthBytes: number;
+  last30dBytes: number;
+  lifetimeBytes: number;
+  level: number;
+  levelMax: number;
+  nextLevelBytes: number | null;
+  boostPermille: number;
+  earn: ShareEarnDto[];
+  priority: boolean;
+  priorityActive: boolean;
+  priorityThresholdBytes: number;
+  priorityWindowDays: number;
+}
+
+export interface ShareUsageDto {
+  month: string;
+  /** RFC 3339。 */
+  resetAt: string;
+  enforced: ShareUsageEnforcedDto;
+  kinds: ShareKindUsageDto[];
+  grants: ShareGrantDto[];
+  contribution: ShareContributionDto;
+}
+
 /** FluxMesh分区完整状态（`AgentSnapshot.share` / `shareChanged`）。 */
 export interface ShareStateDto {
   /** 云端策略允许FluxMesh。 */
@@ -207,6 +304,10 @@ export interface ShareStateDto {
   pendingReceive?: ShareResolveDto | null;
   /** 创建分享时正在做块哈希的任务；旧快照缺失视为空。 */
   hashing?: ShareHashingDto[];
+  /** 额度与贡献（未登录 / 未取到为 `null`）；旧快照缺失视为 `null`。 */
+  usage?: ShareUsageDto | null;
+  /** 最近一次拉取额度失败的原因；成功后清空。 */
+  usageError?: ErrorReason | null;
 }
 
 /** 单个会话的进度 / 路径刷新（`shareProgress`，同 sessionId 后帧完整取代前帧）。 */
@@ -243,6 +344,18 @@ export interface ShareUpdateParams {
 
 export interface ShareIdParams {
   id: string;
+}
+
+export interface ShareReportParams {
+  shareId: string;
+  reason: ShareReportReason;
+  detail?: string;
+  contact?: string;
+}
+
+export interface ShareAppealParams {
+  shareId: string;
+  statement: string;
 }
 
 export interface ShareStopProvidingParams {

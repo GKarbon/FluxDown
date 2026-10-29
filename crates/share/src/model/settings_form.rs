@@ -198,6 +198,66 @@ pub fn rate_text(bytes: Option<u64>, unit: RateUnit) -> String {
     }
 }
 
+// ───────────────────────── 每日共享上传上限 ─────────────────────────
+
+/// 每日上限的单位：GB（2^30 字节）。
+const DAILY_CAP_UNIT_BYTES: u128 = 1 << 30;
+/// 每日上限的上限：1 PiB，与云端 `provideDailyCapDefaultBytes` 校验一致。
+pub const MAX_DAILY_CAP_BYTES: u64 = 1 << 50;
+
+/// 每日上限文本无法解析或超出范围。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidDailyCap;
+
+/// 解析每日共享上传上限（单位 GB，可带小数）：空串 = 跟随云端缺省（`None`）；`0` = 不限（`Some(0)`）；
+/// 其余换算成字节（四舍五入），上限 [`MAX_DAILY_CAP_BYTES`]。
+pub fn parse_daily_cap(text: &str) -> Result<Option<u64>, InvalidDailyCap> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let (int_part, frac_part) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits(int_part) || !digits(frac_part) || (int_part.is_empty() && frac_part.is_empty()) {
+        return Err(InvalidDailyCap);
+    }
+    let int_value: u64 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().map_err(|_| InvalidDailyCap)?
+    };
+    let mut bytes = u128::from(int_value) * DAILY_CAP_UNIT_BYTES;
+    // 小数部分最多取 6 位，其余忽略。
+    let frac_digits = frac_part.get(..6).unwrap_or(frac_part);
+    if !frac_digits.is_empty() {
+        let frac_value: u64 = frac_digits.parse().map_err(|_| InvalidDailyCap)?;
+        let scale = 10u128.pow(u32::try_from(frac_digits.len()).map_err(|_| InvalidDailyCap)?);
+        bytes += (u128::from(frac_value) * DAILY_CAP_UNIT_BYTES + scale / 2) / scale;
+    }
+    match u64::try_from(bytes) {
+        Ok(bytes) if bytes <= MAX_DAILY_CAP_BYTES => Ok(Some(bytes)),
+        _ => Err(InvalidDailyCap),
+    }
+}
+
+/// 每日上限回显：`None` 为空（占位符显示云端缺省）；否则 GB，最多两位小数并去掉尾随 0。
+#[must_use]
+pub fn daily_cap_text(bytes: Option<u64>) -> String {
+    let Some(bytes) = bytes else {
+        return String::new();
+    };
+    let hundredths = (u128::from(bytes) * 100 + DAILY_CAP_UNIT_BYTES / 2) / DAILY_CAP_UNIT_BYTES;
+    let whole = hundredths / 100;
+    let frac = hundredths % 100;
+    if frac == 0 {
+        whole.to_string()
+    } else if frac.is_multiple_of(10) {
+        format!("{whole}.{}", frac / 10)
+    } else {
+        format!("{whole}.{frac:02}")
+    }
+}
+
 // ───────────────────────── 选项列表 ─────────────────────────
 
 /// 默认有效期下拉的一项。
@@ -354,6 +414,8 @@ pub fn normalized(config: &ShareLocalConfigDto) -> ShareLocalConfigDto {
     config.default_tier_id = config.default_tier_id.filter(|id| !id.is_empty());
     config.default_swarm = config.default_swarm.filter(|v| !*v);
     config.auto_provide = config.auto_provide.filter(|v| !*v);
+    // 时区偏移由提交时统一写入，不参与 no-op 判定。
+    config.provide_day_offset_secs = None;
     config
 }
 
@@ -371,6 +433,7 @@ pub struct TextEdits {
     pub udp_v6_invalid: bool,
     pub extra_addrs_invalid: Option<InvalidAddr>,
     pub rate_invalid: bool,
+    pub daily_cap_invalid: bool,
 }
 
 impl TextEdits {
@@ -380,6 +443,7 @@ impl TextEdits {
             || self.udp_v6_invalid
             || self.extra_addrs_invalid.is_some()
             || self.rate_invalid
+            || self.daily_cap_invalid
     }
 }
 
@@ -392,6 +456,7 @@ pub fn apply_text_inputs(
     extra_addrs: &str,
     rate: &str,
     unit: RateUnit,
+    daily_cap: &str,
 ) -> TextEdits {
     let mut config = base.clone();
     let mut edits = TextEdits {
@@ -400,6 +465,7 @@ pub fn apply_text_inputs(
         udp_v6_invalid: false,
         extra_addrs_invalid: None,
         rate_invalid: false,
+        daily_cap_invalid: false,
     };
     match parse_port(udp_v4) {
         Ok(port) => config.udp_port_v4 = port,
@@ -416,6 +482,10 @@ pub fn apply_text_inputs(
     match parse_rate_limit(rate, unit) {
         Ok(bytes) => config.send_rate_limit_bytes_per_sec = bytes,
         Err(InvalidRate) => edits.rate_invalid = true,
+    }
+    match parse_daily_cap(daily_cap) {
+        Ok(bytes) => config.provide_daily_cap_bytes = bytes,
+        Err(InvalidDailyCap) => edits.daily_cap_invalid = true,
     }
     edits.config = config;
     edits
@@ -757,6 +827,7 @@ mod tests {
             "1.2.3.4:5, nope",
             "2",
             RateUnit::MbPerSec,
+            "1.5",
         );
         assert_eq!(edits.config.udp_port_v4, Some(7000));
         assert!(edits.udp_v6_invalid);
@@ -772,12 +843,51 @@ mod tests {
         assert_eq!(edits.config.send_rate_limit_bytes_per_sec, Some(2 << 20));
         assert!(edits.has_error());
 
-        let clean = apply_text_inputs(&current, "", "", "", "", RateUnit::KbPerSec);
+        let clean = apply_text_inputs(&current, "", "", "", "", RateUnit::KbPerSec, "");
         assert!(!clean.has_error());
         assert_eq!(clean.config.udp_port_v4, None);
         assert!(clean.config.extra_addrs.is_empty());
         assert_eq!(clean.config.send_rate_limit_bytes_per_sec, None);
-        let bad_rate = apply_text_inputs(&current, "1111", "", "", "9e9", RateUnit::KbPerSec);
+        let bad_rate = apply_text_inputs(&current, "1111", "", "", "9e9", RateUnit::KbPerSec, "");
         assert!(bad_rate.rate_invalid && bad_rate.has_error());
+        let bad_cap = apply_text_inputs(&current, "", "", "", "", RateUnit::KbPerSec, "-1");
+        assert!(bad_cap.daily_cap_invalid && bad_cap.has_error());
+    }
+
+    #[test]
+    fn daily_cap_parsing_distinguishes_default_unlimited_and_gigabytes() {
+        assert_eq!(parse_daily_cap(""), Ok(None));
+        assert_eq!(parse_daily_cap("   "), Ok(None));
+        assert_eq!(parse_daily_cap("0"), Ok(Some(0)));
+        assert_eq!(parse_daily_cap("0.0"), Ok(Some(0)));
+        assert_eq!(parse_daily_cap(" 20 "), Ok(Some(20 << 30)));
+        assert_eq!(parse_daily_cap("1.5"), Ok(Some(3 << 29)));
+        assert_eq!(parse_daily_cap(".5"), Ok(Some(1 << 29)));
+        assert_eq!(parse_daily_cap("1048576"), Ok(Some(1 << 50)));
+        assert_eq!(parse_daily_cap("1048577"), Err(InvalidDailyCap));
+        assert_eq!(
+            parse_daily_cap("99999999999999999999"),
+            Err(InvalidDailyCap)
+        );
+        assert_eq!(parse_daily_cap("-1"), Err(InvalidDailyCap));
+        assert_eq!(parse_daily_cap("1e3"), Err(InvalidDailyCap));
+        assert_eq!(parse_daily_cap("."), Err(InvalidDailyCap));
+    }
+
+    #[test]
+    fn daily_cap_text_round_trips() {
+        assert_eq!(daily_cap_text(None), "");
+        assert_eq!(daily_cap_text(Some(0)), "0");
+        assert_eq!(daily_cap_text(Some(20 << 30)), "20");
+        assert_eq!(daily_cap_text(Some(3 << 29)), "1.5");
+    }
+
+    #[test]
+    fn day_offset_does_not_affect_noop() {
+        let mut next = base();
+        next.provide_day_offset_secs = Some(28_800);
+        assert!(is_noop(&base(), &next));
+        next.provide_daily_cap_bytes = Some(0);
+        assert!(!is_noop(&base(), &next));
     }
 }

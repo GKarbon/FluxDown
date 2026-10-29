@@ -13,10 +13,13 @@ pub type PanelOpener = Rc<dyn Fn(PanelTarget, &mut Window, &mut App)>;
 pub type ReceiveOpener = Rc<dyn Fn(String, &mut Window, &mut App)>;
 /// 切到FluxMesh管理页的某个页签（`Option<String>` = 要聚焦的会话 ID）。
 pub type ManageOpener = Rc<dyn Fn(ManageTab, Option<String>, &mut Window, &mut App)>;
+/// 打开账号页（购买流量包 / 升级会员 / 登录）。
+pub type AccountOpener = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(Clone, Default)]
 pub struct ShareHost {
     pub open_panel: Option<PanelOpener>,
     pub open_receive: Option<ReceiveOpener>,
     pub open_manage: Option<ManageOpener>,
+    pub open_account: Option<AccountOpener>,
 }

@@ -37,6 +37,13 @@ pub(super) struct StoredShare {
     pub guest_owned: bool,
 }
 
+/// `provide_daily.json`：当日序号与已共享上传的字节。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ProvideDaily {
+    pub day: i64,
+    pub used: u64,
+}
+
 /// 接收记录保留上限。
 pub(super) const RECORD_LIMIT: usize = 200;
 
@@ -115,6 +122,15 @@ impl ShareStore {
 
     pub(super) async fn save_config(&self, config: &ShareLocalConfigDto) -> Result<()> {
         self.write_json("config.json", config).await
+    }
+
+    /// 共享提供的当日用量（反 PCDN 每日上限的跨重启延续）。
+    pub(super) async fn load_daily(&self) -> Option<ProvideDaily> {
+        self.read_json("provide_daily.json").await
+    }
+
+    pub(super) async fn save_daily(&self, daily: &ProvideDaily) -> Result<()> {
+        self.write_json("provide_daily.json", daily).await
     }
 
     pub(super) async fn load_shares(&self) -> Vec<StoredShare> {

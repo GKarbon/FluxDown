@@ -60,6 +60,7 @@ fn host() -> ShareHost {
         open_manage: Some(Rc::new(|tab, session_id, _, cx| {
             open_manage(cx, tab, session_id);
         })),
+        open_account: Some(Rc::new(|_, cx| crate::activity::open_account(cx))),
     }
 }
 
@@ -93,6 +94,9 @@ pub(crate) fn extend_download_actions(host: &mut DownloadHostActions, hub: &Enti
     let bridge_hub = hub.clone();
     host.share_switch_to_bridge = Some(Rc::new(move |task_id, window, cx| {
         fluxdown_ui_share::switch_to_bridge(&bridge_hub, &task_id, window, cx);
+    }));
+    host.share_open_usage = Some(Rc::new(|_, _, cx| {
+        open_manage(cx, ManageTab::Usage, None);
     }));
     let diagnostics_hub = hub.clone();
     host.share_diagnostics_view = Some(Rc::new(move |task_id, window, cx| {

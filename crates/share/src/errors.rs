@@ -3,6 +3,8 @@
 use fluxdown_protocol::{ErrorReason, RpcErrorData};
 use fluxdown_ui_i18n::Translator;
 
+use crate::model::format_datetime;
+
 /// 通用失败文案键（agent 不可达 / 未带细分原因）。
 const GENERIC_ERROR_KEY: &str = "localServiceActionFailed";
 
@@ -34,6 +36,10 @@ pub fn reason_key(reason: Option<ErrorReason>) -> &'static str {
         Some(ErrorReason::ShareOwnShare) => "errReasonShareOwnShare",
         Some(ErrorReason::ShareSourceMissing) => "errReasonShareSourceMissing",
         Some(ErrorReason::ShareSwarmLocked) => "errReasonShareSwarmLocked",
+        Some(ErrorReason::ShareSwarmQuotaExhausted) => "errReasonShareSwarmQuotaExhausted",
+        Some(ErrorReason::ShareSwarmLoginRequired) => "errReasonShareSwarmLoginRequired",
+        Some(ErrorReason::ShareStrikeLimited) => "errReasonShareStrikeLimited",
+        Some(ErrorReason::ShareAppealExists) => "errReasonShareAppealExists",
         _ => GENERIC_ERROR_KEY,
     }
 }
@@ -41,14 +47,25 @@ pub fn reason_key(reason: Option<ErrorReason>) -> &'static str {
 /// 错误的本地化文案。
 #[must_use]
 pub fn error_text(translator: &Translator, error: &RpcErrorData) -> String {
+    if error.reason == Some(ErrorReason::ShareStrikeLimited) {
+        return strike_limited_text(translator, error.field.as_deref());
+    }
     translator.text(error_key(error)).to_owned()
+}
+
+/// 累犯限制文案：`field` 携带解除时刻（RFC 3339），按本机时区格式化；缺失时用 `—` 占位。
+fn strike_limited_text(translator: &Translator, until: Option<&str>) -> String {
+    let time = until
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| "—".to_owned(), format_datetime);
+    translator.text_with("errReasonShareStrikeLimited", &[("time", time.as_str())])
 }
 
 #[cfg(test)]
 mod tests {
     use fluxdown_protocol::{ApplicationErrorCode, ErrorReason, RpcErrorData};
 
-    use super::error_key;
+    use super::{error_key, strike_limited_text};
 
     #[test]
     fn share_reasons_map_to_their_keys_and_everything_else_is_generic() {
@@ -76,6 +93,14 @@ mod tests {
                 "errReasonShareCloudUnavailable",
             ),
             (ErrorReason::ShareSwarmLocked, "errReasonShareSwarmLocked"),
+            (
+                ErrorReason::ShareSwarmQuotaExhausted,
+                "errReasonShareSwarmQuotaExhausted",
+            ),
+            (
+                ErrorReason::ShareSwarmLoginRequired,
+                "errReasonShareSwarmLoginRequired",
+            ),
         ] {
             assert_eq!(error_key(&with(reason)), key);
         }
@@ -87,5 +112,29 @@ mod tests {
             error_key(&RpcErrorData::new(ApplicationErrorCode::Unavailable, true)),
             "localServiceActionFailed"
         );
+    }
+
+    #[test]
+    fn strike_and_appeal_reasons_have_keys() {
+        let with =
+            |reason| RpcErrorData::new(ApplicationErrorCode::Conflict, false).with_reason(reason);
+        assert_eq!(
+            error_key(&with(ErrorReason::ShareStrikeLimited)),
+            "errReasonShareStrikeLimited"
+        );
+        assert_eq!(
+            error_key(&with(ErrorReason::ShareAppealExists)),
+            "errReasonShareAppealExists"
+        );
+    }
+
+    #[test]
+    fn strike_limited_text_fills_time_or_placeholder() -> Result<(), fluxdown_ui_i18n::I18nError> {
+        let catalog = std::sync::Arc::new(fluxdown_ui_i18n::I18nCatalog::load_embedded()?);
+        let translator = catalog.translator("en");
+        assert!(strike_limited_text(&translator, None).contains('—'));
+        assert!(strike_limited_text(&translator, Some("")).contains('—'));
+        assert!(strike_limited_text(&translator, Some("not-a-time")).contains("not-a-time"));
+        Ok(())
     }
 }

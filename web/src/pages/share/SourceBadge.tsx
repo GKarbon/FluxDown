@@ -6,6 +6,7 @@ import { useT } from '../../i18n'
 import { rpc } from '../../lib/rpc'
 import { Badge, toast } from '../../ui'
 import { accountErrorKey } from '../settings/sections/account/errorText'
+import { useNavigate } from '@tanstack/react-router'
 import { canSwitchBridge, shareSourceBadge } from './model'
 import { useShareTaskFacts } from './state'
 
@@ -39,6 +40,7 @@ export function SwitchBridgeButton({ taskId, emphasized, className }: { taskId: 
 export function SourceBadge({ taskId, taskState }: { taskId: string; taskState: string }) {
   const t = useT()
   const facts = useShareTaskFacts(taskId)
+  const navigate = useNavigate()
   const badge = shareSourceBadge(facts)
   if (!badge) return null
   return (
@@ -46,6 +48,18 @@ export function SourceBadge({ taskId, taskState }: { taskId: string; taskState: 
       <Badge tone={badge.tone}>{t(badge.labelKey)}
         {badge.peers > 0 ? ` ${t('shareBadgePeers', { count: badge.peers })}` : ''}
       </Badge>
+      {badge.swarmBlockKey ? (
+        <button
+          type="button"
+          className="shrink-0 whitespace-nowrap text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          onClick={(event) => {
+            event.stopPropagation()
+            void navigate({ to: '/share', search: { tab: 'usage' } })
+          }}
+        >
+          {t(badge.swarmBlockKey)}
+        </button>
+      ) : null}
       {canSwitchBridge(facts, taskState) ? <SwitchBridgeButton taskId={taskId} emphasized={facts?.relayStuck === true} /> : null}
     </span>
   )

@@ -291,6 +291,14 @@ pub const AGENT_SHARE_CONVERT_TO_CLOUD: &str = "agent.share.convertToCloud";
 pub const AGENT_SHARE_DELETE_CLOUD_COPY: &str = "agent.share.deleteCloudCopy";
 /// `ShareStopProvidingParams` → `ShareReceiveRecordDto`：停止该次接收的共享（共享提供），记录 `provideState = stopped`；记录不存在 → `ShareNotFound`。
 pub const AGENT_SHARE_STOP_PROVIDING: &str = "agent.share.stopProviding";
+/// → `ShareUsageDto | null`：FluxMesh额度与贡献（距上次成功拉取不足 30 s 返回缓存，否则先拉取）。
+/// 未登录返回 `null`；结果同时写入 `ShareStateDto.usage` 并发布 `ShareChanged`。
+pub const AGENT_SHARE_USAGE_REFRESH: &str = "agent.share.usageRefresh";
+/// `ShareReportParams` → `{ "ok": true }`：举报一份本机已领取的分享（endpoint 签名提交）；
+/// 未领取 → `Forbidden`，重复举报静默成功。
+pub const AGENT_SHARE_REPORT: &str = "agent.share.report";
+/// `ShareAppealParams` → `ShareDto`：对已下架的分享申诉；已申诉 → `ShareAppealExists`。
+pub const AGENT_SHARE_APPEAL: &str = "agent.share.appeal";
 
 pub const AGENT_PLAN_LIST: &str = "agent.plan.list";
 pub const AGENT_ORDER_CREATE: &str = "agent.order.create";
@@ -601,6 +609,9 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_SHARE_CONVERT_TO_CLOUD,
     AGENT_SHARE_DELETE_CLOUD_COPY,
     AGENT_SHARE_STOP_PROVIDING,
+    AGENT_SHARE_USAGE_REFRESH,
+    AGENT_SHARE_REPORT,
+    AGENT_SHARE_APPEAL,
     AGENT_PLAN_LIST,
     AGENT_ORDER_CREATE,
     AGENT_ORDER_GET,

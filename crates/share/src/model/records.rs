@@ -9,7 +9,12 @@ use fluxdown_protocol::{
 use super::target::ManageTab;
 
 /// 管理页页签的显示顺序。
-pub const MANAGE_TABS: [ManageTab; 3] = [ManageTab::Mine, ManageTab::Received, ManageTab::Network];
+pub const MANAGE_TABS: [ManageTab; 4] = [
+    ManageTab::Mine,
+    ManageTab::Received,
+    ManageTab::Usage,
+    ManageTab::Network,
+];
 
 /// 页签在分段标签里的下标。
 #[must_use]
@@ -32,6 +37,7 @@ pub const fn tab_key(tab: ManageTab) -> &'static str {
     match tab {
         ManageTab::Mine => "shareTabMine",
         ManageTab::Received => "shareTabReceived",
+        ManageTab::Usage => "shareTabUsage",
         ManageTab::Network => "shareTabNetwork",
     }
 }

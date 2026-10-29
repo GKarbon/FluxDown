@@ -62,6 +62,12 @@ pub(super) struct Mock {
     pub(super) swarm_rows: Mutex<Vec<(String, String, String, bool)>>,
     /// 收到的共享登记请求原文。
     pub(super) announces: Mutex<Vec<Value>>,
+    /// `GET /share/usage` 的响应体；`None` = 返回 500。
+    pub(super) usage: Mutex<Option<Value>>,
+    /// 注入 `POST /share/swarm/peers` 的错误：（状态码，错误码）。
+    pub(super) peers_error: Mutex<Option<(StatusCode, &'static str)>>,
+    /// 收到的 `POST /share/report` 请求体。
+    pub(super) reports: Mutex<Vec<Value>>,
 }
 
 pub(super) type MockState = Arc<Mock>;
@@ -77,6 +83,63 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .ok()?
         .strip_prefix("Bearer ")
         .map(str::to_owned)
+}
+
+/// `POST /share/report`：校验 endpoint 签名串（`fluxdown-share-report/v1`），记录请求体，204。
+async fn report_share(State(mock): State<MockState>, Json(body): Json<Value>) -> Response {
+    let endpoint = body["endpointId"].as_str().unwrap_or_default();
+    let timestamp = body["timestamp"].as_u64().unwrap_or_default();
+    let message = format!("fluxdown-share-report/v1\n{endpoint}\n{timestamp}");
+    let verified = (|| {
+        use base64::Engine;
+        let key = EndpointId::from_z32(endpoint).ok()?;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body["signature"].as_str()?)
+            .ok()?;
+        let signature = fluxdown_share::Signature::from_bytes(&raw.try_into().ok()?);
+        key.verify(message.as_bytes(), &signature).ok()
+    })();
+    if verified.is_none() {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    mock.reports.lock().unwrap().push(body);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /share/shares/{id}/appeal`：仅 takedown 可申诉；已申诉 409；成功 201 并写入分享。
+async fn appeal_share(
+    State(mock): State<MockState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let caller = bearer(&headers).unwrap_or_default();
+    let mut shares = mock.shares.lock().unwrap();
+    let Some(share) = shares
+        .iter_mut()
+        .find(|s| s.id == id && same_owner(&s.owner, &caller))
+    else {
+        return error(StatusCode::NOT_FOUND, "not_found");
+    };
+    if share.status != "takedown" {
+        return error(StatusCode::BAD_REQUEST, "validation_error");
+    }
+    if !share.create_body["appeal"].is_null() {
+        return error(StatusCode::CONFLICT, "share_appeal_exists");
+    }
+    let appeal = json!({
+        "status": "pending", "createdAt": "2026-10-29T00:00:00Z",
+        "handledAt": null, "adminNote": null, "statement": body["statement"]
+    });
+    share.create_body["appeal"] = appeal.clone();
+    (StatusCode::CREATED, Json(appeal)).into_response()
+}
+
+async fn usage(State(mock): State<MockState>) -> Response {
+    match mock.usage.lock().unwrap().clone() {
+        Some(body) => Json(body).into_response(),
+        None => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+    }
 }
 
 async fn config(State(mock): State<MockState>) -> Response {
@@ -159,7 +222,9 @@ fn share_json(share: &MockShare) -> Value {
         "maxClaims": null, "claimCount": share.claims, "notifyOnClaim": false,
         "status": share.status, "totalBytes": size,
         "swarm": share.create_body["swarm"].as_bool().unwrap_or(false),
-        "swarmLocked": share.create_body["swarmLocked"].as_bool().unwrap_or(false)
+        "swarmLocked": share.create_body["swarmLocked"].as_bool().unwrap_or(false),
+        "takedownReason": share.create_body["takedownReason"],
+        "appeal": share.create_body["appeal"]
     })
 }
 
@@ -356,6 +421,18 @@ fn swarm_holders(
 
 /// `POST /share/swarm/peers`。
 async fn swarm_peers(State(mock): State<MockState>, Json(body): Json<Value>) -> Response {
+    if let Some((status, code)) = *mock.peers_error.lock().unwrap() {
+        let details = if code == "swarm_quota_exhausted" {
+            json!({ "resetAt": "2099-01-01T00:00:00Z", "retryAfterSecs": 600 })
+        } else {
+            Value::Null
+        };
+        let mut body = json!({ "code": code, "message": code });
+        if !details.is_null() {
+            body["details"] = details;
+        }
+        return (status, Json(body)).into_response();
+    }
     let Ok(ticket) = fluxdown_share::parse_ticket(body["ticket"].as_str().unwrap_or_default())
     else {
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -398,6 +475,7 @@ async fn swarm_peers(State(mock): State<MockState>, Json(body): Json<Value>) -> 
                 exp: payload.exp,
                 scope: "swarm".into(),
                 root: Some(root.to_owned()),
+                pri: 0,
             },
         )
         .unwrap();
@@ -518,6 +596,7 @@ async fn resolve(
             exp: now_unix_secs() + 3600,
             scope: "recv".into(),
             root: None,
+            pri: 0,
         },
     )
     .unwrap();
@@ -561,6 +640,9 @@ pub(super) async fn start_mock() -> (String, MockState) {
         list_delay_ms: std::sync::atomic::AtomicU64::new(0),
         swarm_rows: Mutex::new(Vec::new()),
         announces: Mutex::new(Vec::new()),
+        usage: Mutex::new(None),
+        peers_error: Mutex::new(None),
+        reports: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/api/v1/share/config", get(config))
@@ -579,6 +661,9 @@ pub(super) async fn start_mock() -> (String, MockState) {
         )
         .route("/api/v1/share/resolve", post(resolve))
         .route("/api/v1/share/swarm/peers", post(swarm_peers))
+        .route("/api/v1/share/usage", get(usage))
+        .route("/api/v1/share/report", post(report_share))
+        .route("/api/v1/share/shares/{id}/appeal", post(appeal_share))
         .route("/api/v1/share/swarm/announce", post(swarm_announce))
         .route("/api/v1/share/telemetry/net", post(telemetry_net))
         .route("/api/v1/share/telemetry/sessions", post(telemetry_sessions))
@@ -1629,4 +1714,122 @@ async fn restart_stops_active_shares_whose_source_vanished() {
     assert_eq!(second.service.registry.active_count(), 0);
 
     second.cancel.cancel();
+}
+
+/// 下架：状态映射为 `Takedown` 并带出原因；resume 被拒；申诉成功写回、再次申诉映射 409。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn takedown_maps_reason_and_appeal_round_trips() {
+    use fluxdown_protocol::{ErrorReason, ShareAppealStatus};
+    let (base, mock) = start_mock().await;
+    let (sender, _dir, _payload) = sender_with_file(&base, "takedown_sender", 64 * 1024).await;
+    let share: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+
+    // 未下架时申诉被本机拒绝。
+    let early = call::<ShareDto>(
+        &sender,
+        method::AGENT_SHARE_APPEAL,
+        json!({ "shareId": share.id, "statement": "x" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(early.reason, Some(ErrorReason::ShareStopped));
+
+    {
+        let mut shares = mock.shares.lock().unwrap();
+        shares[0].status = "takedown".to_owned();
+        shares[0].create_body["takedownReason"] = json!("侵权");
+    }
+    sender.service.sync_shares().await;
+    let taken = local_share(&sender, &share.id).unwrap();
+    assert_eq!(taken.status, ShareStatus::Takedown);
+    assert_eq!(taken.takedown_reason.as_deref(), Some("侵权"));
+    assert!(taken.appeal.is_none());
+    assert_eq!(sender.service.registry.active_count(), 0);
+
+    let resume = call::<ShareDto>(
+        &sender,
+        method::AGENT_SHARE_RESUME,
+        json!({ "id": share.id }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(resume.reason, Some(ErrorReason::ShareStopped));
+
+    let appealed: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_APPEAL,
+        json!({ "shareId": share.id, "statement": "这是我的原创内容" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        appealed.appeal.as_ref().map(|a| a.status),
+        Some(ShareAppealStatus::Pending)
+    );
+    assert_eq!(
+        local_share(&sender, &share.id).unwrap().appeal,
+        appealed.appeal
+    );
+
+    let again = call::<ShareDto>(
+        &sender,
+        method::AGENT_SHARE_APPEAL,
+        json!({ "shareId": share.id, "statement": "再来一次" }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(again.reason, Some(ErrorReason::ShareAppealExists));
+    sender.cancel.cancel();
+}
+
+/// 举报：签名串可被本机 endpoint 公钥验证，reason 为规范中文串，空白可选项不上送。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn report_is_signed_with_endpoint_key_and_uses_canonical_reason() {
+    let (base, mock) = start_mock().await;
+    let reporter = node(&base, "report_node", false, Vec::new()).await;
+    let ok: Value = call(
+        &reporter,
+        method::AGENT_SHARE_REPORT,
+        json!({ "shareId": "s9", "reason": "porn", "detail": "  ", "contact": "a@b.c" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok["ok"], json!(true));
+    let sent = mock.reports.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["reason"], json!("色情低俗"));
+    assert_eq!(sent[0]["shareId"], json!("s9"));
+    assert_eq!(sent[0]["contact"], json!("a@b.c"));
+    assert!(sent[0].get("detail").is_none());
+    assert_eq!(
+        sent[0]["endpointId"].as_str(),
+        Some(reporter.service.secret.public().to_z32().as_str())
+    );
+    reporter.cancel.cancel();
+}
+
+/// `share_strike_limited` 的 `field` 携带解除时刻；缺失 details 时安全降级。
+#[test]
+fn strike_limited_carries_until_in_field() {
+    use crate::cloud::CloudError;
+    use fluxdown_protocol::ErrorReason;
+    let mut err = CloudError {
+        status: Some(403),
+        code: Some("share_strike_limited".to_owned()),
+        message: String::new(),
+        retryable: false,
+        unreachable: false,
+        details: Some(Box::new(json!({ "until": "2027-01-01T00:00:00Z" }))),
+    };
+    let mapped = super::cloud::share_error(&err);
+    assert_eq!(mapped.reason, Some(ErrorReason::ShareStrikeLimited));
+    assert_eq!(mapped.field.as_deref(), Some("2027-01-01T00:00:00Z"));
+    err.details = None;
+    assert_eq!(super::cloud::share_error(&err).field, None);
 }

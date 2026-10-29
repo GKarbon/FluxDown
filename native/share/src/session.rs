@@ -82,6 +82,7 @@ pub(crate) struct MonitorConfig {
 pub(crate) struct SourceAccount {
     pub counters: Arc<SourceCounters>,
     pub base: SourceBytes,
+    pub base_peers: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Default)]
@@ -428,6 +429,12 @@ impl Inner {
                 .values()
                 .cloned()
                 .collect(),
+            peer_bytes: self
+                .cfg
+                .sources
+                .as_ref()
+                .map(|a| a.counters.per_peer_delta(&a.base_peers))
+                .unwrap_or_default(),
             is_final,
         }
     }

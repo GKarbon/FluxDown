@@ -604,3 +604,130 @@ async fn kill_session_closes_swarm_connection() {
     );
     assert!(!sender.kill_session(&session_id), "ended session is gone");
 }
+
+fn priority_ticket(rig: &Rig, root: &str, pri: u8) -> String {
+    let mut p = payload("share-pri", &rig.receiver.ep.id_z32(), far_future());
+    p.scope = "swarm".into();
+    p.root = Some(root.to_owned());
+    p.pri = pri;
+    sign_ticket(&rig.signer.secret, &p).unwrap()
+}
+
+/// 保留槽位只接受 `pri = 1` 的票据；保留数为 0 时与原行为相同。
+#[tokio::test]
+async fn reserved_slots_refuse_non_priority_grants() {
+    let rig = rig("swarm-reserved", 5 * MIB).await;
+    let provider = provide_peer(rig.signer.ring.clone(), &rig.file);
+    provider.ep.set_swarm_policy(8, 0, 0);
+    let hint = loopback_hint(&provider.ep).await;
+    let endpoint = rig.receiver.ep.ensure_bound().await.unwrap();
+    let root = rig.file.manifest.files[0].root_hash.clone();
+
+    let mut conns = Vec::new();
+    for _ in 0..24 {
+        let conn = endpoint.connect(hint.clone(), SWARM_ALPN).await.unwrap();
+        let ticket = priority_ticket(&rig, &root, 0);
+        assert_eq!(ask(&conn, &grant(ticket)).await.0.status, SwarmStatus::Ok);
+        conns.push(conn);
+    }
+    // 第 25 条落在保留槽位：pri = 0 被拒。
+    let conn = endpoint.connect(hint.clone(), SWARM_ALPN).await.unwrap();
+    let ticket = priority_ticket(&rig, &root, 0);
+    assert_eq!(ask(&conn, &grant(ticket)).await.0.status, SwarmStatus::Busy);
+    // pri = 1 成功。
+    let conn = endpoint.connect(hint.clone(), SWARM_ALPN).await.unwrap();
+    let ticket = priority_ticket(&rig, &root, 1);
+    assert_eq!(ask(&conn, &grant(ticket)).await.0.status, SwarmStatus::Ok);
+    conns.push(conn);
+    // 保留数为 0：pri = 0 也成功。
+    provider.ep.set_swarm_policy(0, 0, 0);
+    let conn = endpoint.connect(hint, SWARM_ALPN).await.unwrap();
+    let ticket = priority_ticket(&rig, &root, 0);
+    assert_eq!(ask(&conn, &grant(ticket)).await.0.status, SwarmStatus::Ok);
+    conns.push(conn);
+}
+
+/// 每日上限：达到后 `Get` 回 Busy。
+#[tokio::test]
+async fn daily_cap_returns_busy_after_limit() {
+    let g = granted_connection().await;
+    g.provider.ep.set_swarm_policy(0, (8 * MIB) as u64, 0);
+    assert_eq!(fetch_chunk(&g.conn, &g.root, 0).await, (4 * MIB) as u64);
+    assert_eq!(fetch_chunk(&g.conn, &g.root, 0).await, (4 * MIB) as u64);
+    let request = SwarmRequest::Get {
+        root: g.root.clone(),
+        chunk: 0,
+    };
+    assert_eq!(ask(&g.conn, &request).await.0.status, SwarmStatus::Busy);
+    let (_, used) = g.provider.ep.swarm_daily_usage();
+    assert_eq!(used, (8 * MIB) as u64);
+    // 取消上限后恢复服务。
+    g.provider.ep.set_swarm_policy(0, 0, 0);
+    assert_eq!(fetch_chunk(&g.conn, &g.root, 0).await, (4 * MIB) as u64);
+}
+
+/// 接收方的会话报告带逐对端字节，合计等于来源计量。
+#[tokio::test]
+async fn receiver_reports_bytes_per_peer() {
+    let rig = rig_with("swarm-perpeer", 20 * MIB, |p| {
+        p.addr_hint = None;
+        p.connect_timeout = Duration::from_millis(1500);
+    })
+    .await;
+    let provider = provide_peer(rig.signer.ring.clone(), &rig.file);
+    attach(&rig, &[(&provider, true)]).await;
+    wait_peers(&rig.session, 1).await;
+    let resp = http().get(rig.url()).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    resp.bytes().await.unwrap();
+    rig.session.close().await;
+
+    let reports = rig.receiver.sink.sessions.lock().unwrap().clone();
+    let mut per_peer = 0;
+    for report in reports.iter().filter(|r| r.is_final) {
+        for entry in &report.peer_bytes {
+            assert_eq!(entry.endpoint_id, provider.ep.id_z32());
+            per_peer += entry.bytes;
+        }
+    }
+    assert_eq!(per_peer, (20 * MIB) as u64);
+}
+
+/// 同一 session_id 下，每个对端的 `peerBytes` 在多次上报中单调不减（终态报告也是累计值）。
+#[tokio::test]
+async fn peer_bytes_are_cumulative_within_a_session_id() {
+    let rig = rig("swarm-mono", 32 * MIB).await;
+    let provide_a = provide_peer(rig.signer.ring.clone(), &rig.file);
+    let provide_b = provide_peer(rig.signer.ring.clone(), &rig.file);
+    attach(&rig, &[(&provide_a, true), (&provide_b, true)]).await;
+    wait_peers(&rig.session, 2).await;
+    let url = rig.url();
+    for i in 0..4u64 {
+        let range = format!(
+            "bytes={}-{}",
+            i * 8 * MIB as u64,
+            (i + 1) * 8 * MIB as u64 - 1
+        );
+        let resp = get_range(&url, &range).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        resp.bytes().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+    }
+    rig.session.close().await;
+
+    let reports = rig.receiver.sink.sessions.lock().unwrap().clone();
+    let mut last: std::collections::HashMap<(String, String), u64> = Default::default();
+    let mut seen = 0;
+    for report in reports.iter().filter(|r| r.role == SessionRole::Receiver) {
+        for entry in &report.peer_bytes {
+            let key = (report.session_id.clone(), entry.endpoint_id.clone());
+            let prev = last.insert(key, entry.bytes).unwrap_or(0);
+            assert!(
+                entry.bytes >= prev,
+                "peerBytes went backwards within a session id"
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "expected at least one peerBytes entry");
+}

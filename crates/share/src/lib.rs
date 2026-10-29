@@ -5,6 +5,7 @@
 //! [`ShareHost`] 回调请求打开，不依赖 downloads / settings 等其它 capability。
 
 mod actions;
+mod appeal;
 mod cloud_ui;
 mod errors;
 mod exit_ui;
@@ -18,6 +19,7 @@ mod panel;
 mod port;
 mod qr;
 mod receive;
+mod report;
 mod session_view;
 mod settings_view;
 mod task_diagnostics;
@@ -26,7 +28,7 @@ mod window_ui;
 pub use actions::switch_to_bridge;
 pub use errors::{error_key, error_text};
 pub use exit_ui::{ExitContinuation, needs_exit_gate, run_exit_gate};
-pub use host::{ManageOpener, PanelOpener, ReceiveOpener, ShareHost};
+pub use host::{AccountOpener, ManageOpener, PanelOpener, ReceiveOpener, ShareHost};
 pub use hub::{ManageRequest, ShareHub, ShareHubEvent};
 pub use model::{ManageTab, PanelTarget, panel_key};
 pub use page::ShareView;

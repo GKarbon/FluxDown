@@ -2381,6 +2381,7 @@ impl DownloadTableDelegate {
                     badge,
                     &self.strings,
                     self.store.share_host().switch_bridge,
+                    self.store.share_host().open_usage,
                     self.host.as_ref(),
                     cx,
                 )

@@ -17,7 +17,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fluxdown_protocol::{
     ApplicationErrorCode, ErrorReason, RpcErrorData, ShareProvideState, ShareReceiveRecordDto,
-    ShareReceiveStatus, ShareStatus,
+    ShareReceiveStatus, ShareStatus, ShareSwarmBlock,
 };
 use fluxdown_share::hashing::{file_mtime_ms, parse_hash};
 use fluxdown_share::timefmt::now_unix_secs;
@@ -48,6 +48,9 @@ pub(super) const LOOKUP_RETRY: Duration = Duration::from_secs(60);
 /// 云端建议的刷新间隔的取值范围。
 const REFRESH_MIN: u64 = 30;
 const REFRESH_MAX: u64 = 600;
+/// 额度用完后的缺省重试间隔与上限（秒）；云端 `details.retryAfterSecs` 优先。
+const QUOTA_RETRY_DEFAULT_SECS: u64 = 600;
+const QUOTA_RETRY_MAX_SECS: u64 = 3600;
 
 /// 下载完成的接收任务：（任务 ID，记录 ID，清单里的文件）。
 pub(super) type FinishedFile = (String, String, ShareFile);
@@ -58,6 +61,15 @@ pub(super) enum Lookup {
     Refresh(Duration),
     /// 云端不支持共享。
     Unsupported,
+    /// 云端拒绝共享加速（额度用完 / 需要登录）；`Some` = 这段时间之后再查，`None` = 不再重试。
+    Blocked(ShareSwarmBlock, Option<Duration>),
+}
+
+/// 等待登录的对端查询所需参数。
+pub(super) struct LoginWaiting {
+    pub share_id: String,
+    pub ticket: String,
+    pub indexes: Vec<u32>,
 }
 
 impl Inner {
@@ -705,6 +717,7 @@ impl ShareService {
 
     /// 向云端登记本机持有的内容并撤销已不提供的；结果决定下一次登记的时刻。
     pub(super) async fn announce(&self) {
+        self.persist_daily().await;
         if self.with(|i| i.swarm_unsupported) {
             self.with(|i| i.announce_at = None);
             return;
@@ -866,6 +879,7 @@ impl ShareService {
                     })
                     .collect();
                 session.set_swarm(files);
+                self.set_swarm_block(share_id, None).await;
                 Lookup::Refresh(Duration::from_secs(
                     response.refresh_secs.clamp(REFRESH_MIN, REFRESH_MAX),
                 ))
@@ -874,10 +888,88 @@ impl ShareService {
                 self.with(|i| i.swarm_unsupported = true);
                 Lookup::Unsupported
             }
+            Err(error) if error.code.as_deref() == Some("swarm_quota_exhausted") => {
+                let retry = error
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("retryAfterSecs"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(QUOTA_RETRY_DEFAULT_SECS)
+                    .clamp(REFRESH_MIN, QUOTA_RETRY_MAX_SECS);
+                self.set_swarm_block(share_id, Some(ShareSwarmBlock::QuotaExhausted))
+                    .await;
+                self.refresh_usage().await;
+                Lookup::Blocked(
+                    ShareSwarmBlock::QuotaExhausted,
+                    Some(Duration::from_secs(retry)),
+                )
+            }
+            Err(error) if error.code.as_deref() == Some("swarm_login_required") => {
+                self.set_swarm_block(share_id, Some(ShareSwarmBlock::LoginRequired))
+                    .await;
+                Lookup::Blocked(ShareSwarmBlock::LoginRequired, None)
+            }
             Err(error) => {
                 tracing::debug!(error = %error, "swarm peer lookup failed; will retry");
                 Lookup::Refresh(LOOKUP_RETRY)
             }
+        }
+    }
+
+    /// 记下 / 清除某个分享的共享加速受限原因；变化时刷新任务行。
+    async fn set_swarm_block(&self, share_id: &str, block: Option<ShareSwarmBlock>) {
+        let changed = self.with(|i| match block {
+            Some(block) => i.swarm_blocks.insert(share_id.to_owned(), block) != Some(block),
+            None => i.swarm_blocks.remove(share_id).is_some(),
+        });
+        if changed {
+            self.publish().await;
+        }
+    }
+
+    /// 「需要登录」：停止轮询，登录后（`on_account_changed`）重新开始。
+    fn hold_for_login(&self, token: &str, share_id: &str, ticket: &str, indexes: &[u32]) {
+        self.with(|i| {
+            i.swarm_login_waiting.insert(
+                token.to_owned(),
+                LoginWaiting {
+                    share_id: share_id.to_owned(),
+                    ticket: ticket.to_owned(),
+                    indexes: indexes.to_vec(),
+                },
+            );
+        });
+    }
+
+    /// 首次查询之后接着做什么：按结果开始后台刷新、或等登录、或不再查询。
+    pub(super) fn continue_lookup(
+        &self,
+        first: Lookup,
+        token: &str,
+        share_id: &str,
+        ticket: &str,
+        indexes: &[u32],
+    ) {
+        match first {
+            Lookup::Refresh(delay) | Lookup::Blocked(_, Some(delay)) => self.spawn_swarm_lookup(
+                token.to_owned(),
+                share_id.to_owned(),
+                ticket.to_owned(),
+                indexes.to_vec(),
+                delay,
+            ),
+            Lookup::Blocked(ShareSwarmBlock::LoginRequired, None) => {
+                self.hold_for_login(token, share_id, ticket, indexes);
+            }
+            Lookup::Blocked(_, None) | Lookup::Unsupported => {}
+        }
+    }
+
+    /// 登录后：重新开始因「需要登录」而停止的对端查询。
+    pub(super) fn resume_login_lookups(&self) {
+        let waiting = self.with(|i| std::mem::take(&mut i.swarm_login_waiting));
+        for (token, w) in waiting {
+            self.spawn_swarm_lookup(token, w.share_id, w.ticket, w.indexes, Duration::ZERO);
         }
     }
 
@@ -906,8 +998,12 @@ impl ShareService {
                     .swarm_lookup(&session, &share_id, &ticket, &indexes)
                     .await
                 {
-                    Lookup::Refresh(next) => next,
-                    Lookup::Unsupported => return,
+                    Lookup::Refresh(next) | Lookup::Blocked(_, Some(next)) => next,
+                    Lookup::Blocked(ShareSwarmBlock::LoginRequired, None) => {
+                        service.hold_for_login(&token, &share_id, &ticket, &indexes);
+                        return;
+                    }
+                    Lookup::Blocked(_, None) | Lookup::Unsupported => return,
                 };
                 service.sync_content();
             }

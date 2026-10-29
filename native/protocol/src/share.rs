@@ -17,6 +17,9 @@ use serde_json::Value;
 /// [`ShareStateDto::receive_records`] 在快照里最多保留的最近记录数；更早的记录经
 /// `agent.share.receiveRecords` 翻页读取。
 pub const SHARE_STATE_RECEIVE_RECORDS: usize = 20;
+/// 面向用户的字节字段展示封顶（1 PiB）。FluxCloud 把额度类字节字段封顶到此值，客户端
+/// 遇到 `>=` 此值显示「≥ 1 PB」。
+pub const DISPLAY_BYTES_CAP: u64 = 1 << 50;
 
 // ───────────────────────── 枚举 ─────────────────────────
 
@@ -123,7 +126,61 @@ pub enum ShareStatus {
     Expired,
     /// 已被停止（分享方或后台）。
     Stopped,
+    /// 已被后台下架（`ShareDto.takedownReason` 为原因；可申诉一次）。
+    Takedown,
     /// 对端发送了本端不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// FluxMesh流量种类（额度按种类独立记账）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ShareTrafficKind {
+    /// 共享加速额度：从其他用户的共享收到的字节。
+    Swarm,
+    /// 官方加速流量（CDN / 桥接）。
+    Download,
+    /// 云端上传流量。
+    Upload,
+    /// 对端发送了本端不认识的种类。
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// 额度明细（grant）的来源。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ShareGrantSource {
+    /// 流量包。
+    Pack,
+    /// 上月未用完的赠送额度结转。
+    Rollover,
+    /// 共享贡献赚取。
+    Contribution,
+    /// 后台赠送。
+    Admin,
+    /// 后台手工免费来源。
+    Free,
+    /// 对端发送了本端不认识的来源。
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// 共享加速被云端拒绝的原因（`ShareTaskFactsDto.swarmBlock`）。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ShareSwarmBlock {
+    /// 本月共享加速额度已用完。
+    QuotaExhausted,
+    /// 需要登录。
+    LoginRequired,
+    /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,
 }
@@ -315,6 +372,47 @@ pub struct ShareDto {
     /// 管理员已关闭并锁定该分享的共享：此时 `swarm` 恒为 `false`，且不能再打开。
     #[serde(default)]
     pub swarm_locked: bool,
+    /// 下架原因（仅 `status = takedown` 时存在）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takedown_reason: Option<String>,
+    /// 下架申诉（提交过才有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appeal: Option<ShareAppealDto>,
+}
+
+/// 申诉处理状态。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ShareAppealStatus {
+    /// 待处理。
+    #[default]
+    Pending,
+    /// 已通过（分享已恢复）。
+    Approved,
+    /// 已驳回。
+    Rejected,
+    /// 对端发送了本端不认识的状态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 一份分享的下架申诉。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ShareAppealDto {
+    #[serde(default)]
+    pub status: ShareAppealStatus,
+    /// 提交时间（RFC 3339）。
+    #[serde(default)]
+    pub created_at: String,
+    /// 处理时间（RFC 3339）。
+    #[serde(default)]
+    pub handled_at: Option<String>,
+    /// 后台处理备注。
+    #[serde(default)]
+    pub admin_note: Option<String>,
 }
 
 /// 一个有效期档位。
@@ -357,6 +455,12 @@ pub struct SharePolicySummaryDto {
     /// 打洞超过该秒数仍走中继时提示切换桥接。
     #[serde(default)]
     pub hole_punch_hint_secs: u64,
+    /// 提供方为「优先」请求保留的连接数（云端下发，0 = 不保留）。
+    #[serde(default)]
+    pub swarm_priority_reserved_slots: u32,
+    /// 「每日共享上传上限」的云端缺省值（字节，0 = 不限）。
+    #[serde(default)]
+    pub provide_daily_cap_default_bytes: u64,
 }
 
 /// 策略中的一个中继节点（仅展示）。
@@ -414,6 +518,12 @@ pub struct ShareLocalConfigDto {
     /// 接收的文件参与共享（共享）；`None` = 开。
     #[serde(default)]
     pub auto_provide: Option<bool>,
+    /// 每日共享上传上限（只计为他人提供）：`None` = 跟随云端缺省，`Some(0)` = 不限，`Some(n)` = 字节。
+    #[serde(default)]
+    pub provide_daily_cap_bytes: Option<u64>,
+    /// 「自然日」划分用的本地时区偏移（秒，UTC+8 = 28800），由 UI 每次提交时写入；`None` 按 UTC。
+    #[serde(default)]
+    pub provide_day_offset_secs: Option<i32>,
 }
 
 /// 本机端点网络状态（展示与上报 FluxCloud 的快照的同源摘要；端点未绑定时多为空）。
@@ -480,6 +590,9 @@ pub struct ShareTaskFactsDto {
     /// 当前在线、可共享取块的其他设备数。
     #[serde(default)]
     pub swarm_peers: u32,
+    /// 共享加速被云端拒绝的原因（查找成功后清空）；任务仍从分享方直连继续。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_block: Option<ShareSwarmBlock>,
 }
 
 /// 创建分享时正在做块哈希的任务，`agent.share.create` 返回前出现，完成后移除。
@@ -520,6 +633,108 @@ pub struct ShareReceiveRecordDto {
     pub provide_state: ShareProvideState,
 }
 
+/// 「额度与贡献」：`GET /share/usage` 的投影（`ShareStateDto.usage`）。字节字段已由云端封顶到
+/// [`DISPLAY_BYTES_CAP`]。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ShareUsageDto {
+    /// 计费月份 `YYYY-MM`（北京时间自然月）。
+    #[serde(default)]
+    pub month: String,
+    /// 本月额度重置时刻（RFC3339）。
+    #[serde(default)]
+    pub reset_at: String,
+    #[serde(default)]
+    pub enforced: ShareUsageEnforcedDto,
+    /// 固定顺序：swarm、download、upload。
+    #[serde(default)]
+    pub kinds: Vec<ShareKindUsageDto>,
+    /// 有效且余额 > 0 的额度明细，按消耗顺序。
+    #[serde(default)]
+    pub grants: Vec<ShareGrantDto>,
+    #[serde(default)]
+    pub contribution: ShareContributionDto,
+}
+
+/// 云端当前是否按额度拦截。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShareUsageEnforcedDto {
+    /// 官方加速 / 云端上传流量超额即拒绝。
+    pub traffic: bool,
+    /// 共享加速额度超额即拒绝。
+    pub swarm: bool,
+}
+
+/// 单种流量的本月额度。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShareKindUsageDto {
+    pub kind: ShareTrafficKind,
+    /// 月额度为 0（不限）。
+    pub unlimited: bool,
+    /// 本月赠送额度。
+    pub monthly_allowance: u64,
+    pub used_this_month: u64,
+    /// 剩余（本月赠送剩余 + 有效 grant 余额 − 预占），下限 0。
+    pub remaining: u64,
+    /// 进行中预占。
+    pub reserved: u64,
+}
+
+/// 一笔有效额度明细。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShareGrantDto {
+    pub source: ShareGrantSource,
+    pub kind: ShareTrafficKind,
+    pub bytes: u64,
+    pub used_bytes: u64,
+    /// 到期时刻（RFC3339），`None` 为长期有效。
+    pub expires_at: Option<String>,
+}
+
+/// 共享贡献与等级。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShareContributionDto {
+    pub month_bytes: u64,
+    pub last30d_bytes: u64,
+    pub lifetime_bytes: u64,
+    pub level: u32,
+    pub level_max: u32,
+    /// 下一级所需的终身贡献；已满级为 `None`。
+    pub next_level_bytes: Option<u64>,
+    /// 当前生效的贡献赚取加成（‰，1000 = ×1）。
+    pub boost_permille: u32,
+    pub earn: Vec<ShareEarnDto>,
+    /// 提供方繁忙时本账号享有优先。
+    pub priority: bool,
+    /// 云端已启用优先保留槽位。
+    pub priority_active: bool,
+    /// 贡献带来优先的门槛（0 = 贡献不带来优先）。
+    pub priority_threshold_bytes: u64,
+    pub priority_window_days: u32,
+}
+
+/// 单种流量的贡献赚取规则与本月进度。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShareEarnDto {
+    pub kind: ShareTrafficKind,
+    pub permille: u32,
+    pub earned_this_month: u64,
+    /// 每月赚取上限，0 = 不限。
+    pub cap_bytes: u64,
+    pub valid_months: u32,
+}
+
 /// FluxMesh分区的完整状态（`AgentSnapshot.share`，`AgentEvent::ShareChanged` 整体替换）。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -557,6 +772,12 @@ pub struct ShareStateDto {
     /// 创建分享时正在做块哈希的任务，`agent.share.create` 返回前出现，完成后移除。
     #[serde(default)]
     pub hashing: Vec<ShareHashingDto>,
+    /// 最近一次成功拉取的FluxMesh额度与贡献；未登录为 `None`。装箱以免撑大 `AgentEvent::ShareChanged`。
+    #[serde(default)]
+    pub usage: Option<Box<ShareUsageDto>>,
+    /// 最近一次额度拉取失败的原因（成功后清空；保留旧 `usage`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_error: Option<crate::ErrorReason>,
 }
 
 impl ShareStateDto {
@@ -660,6 +881,72 @@ pub struct ShareIdParams {
 #[serde(rename_all = "camelCase")]
 pub struct ShareStopProvidingParams {
     pub record_id: String,
+}
+
+/// 举报原因（固定枚举；agent 映射为云端规范中文串）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ShareReportReason {
+    /// 侵权。
+    Copyright,
+    /// 色情低俗。
+    Porn,
+    /// 违法违规。
+    Illegal,
+    /// 恶意软件。
+    Malware,
+    /// 其他。
+    #[default]
+    Other,
+}
+
+impl ShareReportReason {
+    /// 全部原因（UI 单选顺序）。
+    pub const ALL: [Self; 5] = [
+        Self::Copyright,
+        Self::Porn,
+        Self::Illegal,
+        Self::Malware,
+        Self::Other,
+    ];
+
+    /// 云端（官网落地页同口径）规范提交值。
+    #[must_use]
+    pub const fn canonical(self) -> &'static str {
+        match self {
+            Self::Copyright => "侵权",
+            Self::Porn => "色情低俗",
+            Self::Illegal => "违法违规",
+            Self::Malware => "恶意软件",
+            Self::Other => "其他",
+        }
+    }
+}
+
+/// `agent.share.report` 参数：举报一份已领取的分享（以本机 endpoint 签名提交）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ShareReportParams {
+    pub share_id: String,
+    pub reason: ShareReportReason,
+    /// 补充说明（≤ 2000 字）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// 联系方式（≤ 200 字）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+}
+
+/// `agent.share.appeal` 参数：对已下架的分享申诉（每个分享一次）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ShareAppealParams {
+    pub share_id: String,
+    /// 申诉说明（非空，≤ 1000 字）。
+    pub statement: String,
 }
 
 /// `agent.share.convertToCloud` 参数：把一个实时分享转为云端暂存并开始上传。

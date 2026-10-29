@@ -221,6 +221,9 @@ pub struct TicketPayload {
     /// 共享（`swarm`）票据绑定的内容：文件根哈希（64 位小写 hex）；其他作用域为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    /// 共享（`swarm`）票据的优先标记：1 = 提供方繁忙时可使用保留连接槽位；缺省 0 不序列化。
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub pri: u8,
 }
 
 /// 票据：`base64url(payloadJson) "." base64url(ed25519Sig)`，签名对象是 payload JSON 原始字节。
@@ -401,6 +404,9 @@ pub struct SessionReport {
     /// 其他角色为空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub swarm_files: Vec<SwarmServedFile>,
+    /// 共享接收方：逐提供方对端累计字节（按 bytes 降序，最多 [`MAX_PEER_BYTES`] 条）；其他角色为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_bytes: Vec<PeerBytes>,
     /// 是否终态。
     #[serde(rename = "final")]
     pub is_final: bool,
@@ -420,6 +426,23 @@ pub struct SwarmServedFile {
 
 /// 单份会话报告最多携带的 [`SwarmServedFile`] 条数（FluxCloud 的校验上限）。
 pub const MAX_SWARM_FILES: usize = 64;
+
+/// 接收方从某个提供方对端收到的累计字节。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerBytes {
+    /// 提供方 endpoint ID（z32）。
+    pub endpoint_id: String,
+    /// 累计字节。
+    pub bytes: u64,
+}
+
+/// 单份会话报告最多携带的 [`PeerBytes`] 条数（FluxCloud 的校验上限）。
+pub const MAX_PEER_BYTES: usize = 64;
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
 
 // ───────────────────────── 网络快照（§9.4） ─────────────────────────
 

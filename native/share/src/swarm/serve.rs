@@ -56,6 +56,48 @@ const CLOSE_IDLE: u32 = 0x13;
 /// 数据流复位码：读盘失败。
 const RESET_INTERNAL: u32 = 0x20;
 
+/// 保留槽位数上限（与云端 `swarmPriorityReservedSlots` 校验一致）。
+const MAX_PRIORITY_RESERVED: usize = 16;
+
+/// 每日提供预算：按 UI 提交的 UTC 偏移划分自然日。
+#[derive(Debug, Default)]
+struct DailyBudget {
+    day: i64,
+    used: u64,
+    /// 0 = 不限。
+    cap: u64,
+    offset_secs: i64,
+}
+
+impl DailyBudget {
+    fn day_of(&self, now_unix: u64) -> i64 {
+        let now = i64::try_from(now_unix).unwrap_or(i64::MAX);
+        now.saturating_add(self.offset_secs).div_euclid(86_400)
+    }
+
+    /// 跨日则清零。
+    fn roll(&mut self, now_unix: u64) {
+        let day = self.day_of(now_unix);
+        if day != self.day {
+            self.day = day;
+            self.used = 0;
+        }
+    }
+}
+
+impl ServerInner {
+    /// 预占 `len` 字节的当日额度：已达上限返回 `false`；否则累加（允许超出一块）。
+    fn try_take_daily(&self, len: u64) -> bool {
+        let mut d = self.daily.lock().unwrap_or_else(PoisonError::into_inner);
+        d.roll(now_unix_secs());
+        if d.cap > 0 && d.used >= d.cap {
+            return false;
+        }
+        d.used = d.used.saturating_add(len);
+        true
+    }
+}
+
 struct ServerInner {
     content: ContentRegistry,
     keys: KeyRing,
@@ -68,6 +110,10 @@ struct ServerInner {
     gets: Semaphore,
     /// 进行中的提供方会话（会话 ID → 连接上下文），供强制中断查找。
     live: Mutex<HashMap<String, Arc<ConnCtx>>>,
+    /// 为优先请求保留的连接槽位数（连接序号落在最后 N 个的连接只接受 `pri = 1`）。
+    priority_reserved: AtomicUsize,
+    /// 每日提供预算（反 PCDN）。
+    daily: Mutex<DailyBudget>,
 }
 
 /// 共享提供端（可克隆，内部共享）。
@@ -97,6 +143,8 @@ impl SwarmServer {
                 connections: AtomicUsize::new(0),
                 gets: Semaphore::new(MAX_CONCURRENT_GETS),
                 live: Mutex::new(HashMap::new()),
+                priority_reserved: AtomicUsize::new(0),
+                daily: Mutex::new(DailyBudget::default()),
             }),
         }
     }
@@ -104,6 +152,49 @@ impl SwarmServer {
     pub(crate) fn handler(&self) -> SwarmHandler {
         SwarmHandler {
             server: self.clone(),
+        }
+    }
+
+    /// 更新保留给优先请求的连接槽位数（截断到 [`MAX_PRIORITY_RESERVED`]）。
+    pub(crate) fn set_priority_reserved(&self, n: usize) {
+        self.inner
+            .priority_reserved
+            .store(n.min(MAX_PRIORITY_RESERVED), Ordering::Relaxed);
+    }
+
+    /// 设置每日提供上限（0 = 不限）与自然日的 UTC 偏移（秒）。
+    pub(crate) fn set_daily_cap(&self, cap: u64, utc_offset_secs: i64) {
+        let mut d = self
+            .inner
+            .daily
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        d.cap = cap;
+        d.offset_secs = utc_offset_secs;
+        d.roll(now_unix_secs());
+    }
+
+    /// 当前（日序号，已提供字节）。
+    pub(crate) fn daily_usage(&self) -> (i64, u64) {
+        let mut d = self
+            .inner
+            .daily
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        d.roll(now_unix_secs());
+        (d.day, d.used)
+    }
+
+    /// 启动时恢复落盘的当日用量（日序号不是今天则忽略）。
+    pub(crate) fn restore_daily(&self, day: i64, used: u64) {
+        let mut d = self
+            .inner
+            .daily
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        d.roll(now_unix_secs());
+        if d.day == day {
+            d.used = d.used.max(used);
         }
     }
 
@@ -165,6 +256,8 @@ struct ConnCtx {
     session: OnceLock<SwarmSession>,
     /// 会话被宿主 / 后台强制中断。
     killed: AtomicBool,
+    /// 本连接落在为优先请求保留的槽位里：只接受 `pri = 1` 的票据。
+    reserved_slot: bool,
 }
 
 /// 一条连接的提供方会话。
@@ -205,11 +298,14 @@ impl Drop for EndGuard {
 
 impl SwarmServer {
     async fn serve(&self, conn: Connection) {
-        if self.inner.connections.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+        let before = self.inner.connections.fetch_add(1, Ordering::SeqCst);
+        if before >= MAX_CONNECTIONS {
             self.inner.connections.fetch_sub(1, Ordering::SeqCst);
             conn.close(CLOSE_BUSY.into(), b"busy");
             return;
         }
+        let reserved = self.inner.priority_reserved.load(Ordering::Relaxed);
+        let reserved_slot = before >= MAX_CONNECTIONS.saturating_sub(reserved);
         let _guard = ConnGuard(self.inner.clone());
         let ctx = Arc::new(ConnCtx {
             peer: conn.remote_id(),
@@ -217,6 +313,7 @@ impl SwarmServer {
             grants: Mutex::new(HashMap::new()),
             session: OnceLock::new(),
             killed: AtomicBool::new(false),
+            reserved_slot,
         });
         // 守卫保证：无论循环正常结束还是 Router 关闭时任务被中止，会话都会收尾并发出终态报告。
         let mut end = EndGuard {
@@ -287,7 +384,19 @@ impl SwarmServer {
         match request {
             SwarmRequest::Grant { ticket } => {
                 let reply = self.grant(ctx, &ticket);
-                reply_only(&mut send, &reply).await
+                let busy = reply.status == SwarmStatus::Busy && ctx.reserved_slot;
+                let sent = reply_only(&mut send, &reply).await;
+                if busy {
+                    // 等对端收齐回复（或短暂超时）再关连接，否则 Busy 回复会被关闭码吞掉。
+                    if tokio::time::timeout(Duration::from_secs(1), send.stopped())
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!("busy reply was not acknowledged in time");
+                    }
+                    ctx.conn.close(CLOSE_BUSY.into(), b"busy");
+                }
+                sent
             }
             SwarmRequest::Have { root } => match self.authorized(ctx, &root) {
                 Err(status) => reply_only(&mut send, &SwarmReply::status(status)).await,
@@ -356,6 +465,12 @@ impl SwarmServer {
                 "content is not available on this device".to_owned(),
             );
         };
+        if ctx.reserved_slot && payload.pri == 0 {
+            return bad(
+                SwarmStatus::Busy,
+                "reserved slots only serve priority tickets".to_owned(),
+            );
+        }
         self.open_session(ctx, &payload.sid);
         {
             let mut grants = ctx.grants.lock().unwrap_or_else(PoisonError::into_inner);
@@ -456,6 +571,9 @@ impl SwarmServer {
         };
         let end = start.saturating_add(CHUNK_SIZE).min(size);
         let len = end - start;
+        if !self.inner.try_take_daily(len) {
+            return reply_only(send, &SwarmReply::status(SwarmStatus::Busy)).await;
+        }
         let Ok(_permit) = self.inner.gets.acquire().await else {
             return reply_only(send, &SwarmReply::status(SwarmStatus::Busy)).await;
         };

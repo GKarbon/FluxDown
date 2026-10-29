@@ -9,7 +9,7 @@ use std::sync::Arc;
 use fluxdown_protocol::{
     AgentEvent, DaemonEvent, ErrorReason, ShareConfigDto, ShareDiagnosticsDto, ShareDto,
     ShareProvideState, ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiveResultDto,
-    ShareResolveDto, ShareSessionRole, method,
+    ShareResolveDto, ShareSessionRole, ShareSwarmBlock, method,
 };
 use fluxdown_share::{EndpointAddr, EndpointId};
 use serde_json::{Value, json};
@@ -691,5 +691,30 @@ async fn admin_swarm_lock_is_applied_and_blocks_reenabling() {
     .unwrap();
     assert!(!off.swarm && off.swarm_locked);
 
+    a.cancel.cancel();
+}
+
+/// 云端拒绝共享加速（额度用完）：任务行带 `swarmBlock`，但仍从分享方直连完成。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quota_exhausted_blocks_swarm_but_origin_completes() {
+    let (base, mock) = start_mock().await;
+    let (a, _dir, payload) = sender_with_file(&base, "swarm_quota_a", 5 * MIB).await;
+    let share: ShareDto = call(&a, method::AGENT_SHARE_CREATE, json!({ "taskIds": ["t1"] }))
+        .await
+        .unwrap();
+    *mock.peers_error.lock().unwrap() =
+        Some((axum::http::StatusCode::FORBIDDEN, "swarm_quota_exhausted"));
+    let b = node(&base, "swarm_quota_b", false, Vec::new()).await;
+    point_receiver_at(&b, &a);
+    let dir_b = temp_dir("quota_b");
+    let url = receive_url(&b, &share.pickup_code, &dir_b).await;
+    assert_eq!(fetch(&url).await, payload);
+
+    let state = b.service.with(|i| i.state_dto(false));
+    assert_eq!(
+        state.task_facts["recv-task-1"].swarm_block,
+        Some(ShareSwarmBlock::QuotaExhausted)
+    );
+    b.cancel.cancel();
     a.cancel.cancel();
 }

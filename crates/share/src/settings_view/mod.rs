@@ -22,8 +22,10 @@ use gpui_component::input::{InputEvent, InputState, TextareaState};
 
 use crate::{
     hub::ShareHub,
+    model::format_bytes,
     model::settings_form::{
-        RateUnit, TextEdits, extra_addrs_text, port_text, preferred_rate_unit, rate_text,
+        RateUnit, TextEdits, daily_cap_text, extra_addrs_text, port_text, preferred_rate_unit,
+        rate_text,
     },
 };
 
@@ -43,6 +45,8 @@ pub(super) const EXTRA_ADDRS_ROWS: (usize, usize) = (2, 5);
 /// 端口输入最多 5 位；限速输入最多 12 个字符（含小数点）。
 pub(super) const PORT_MAX_CHARS: usize = 5;
 pub(super) const RATE_MAX_CHARS: usize = 12;
+/// 每日上限输入最多 12 个字符（含小数点）。
+pub(super) const DAILY_CAP_MAX_CHARS: usize = 12;
 
 pub struct ShareSettingsView {
     hub: Entity<ShareHub>,
@@ -56,6 +60,7 @@ pub struct ShareSettingsView {
     udp_v6: Entity<InputState>,
     extra_addrs: Entity<TextareaState>,
     rate: Entity<InputState>,
+    daily_cap: Entity<InputState>,
     rate_unit: RateUnit,
     /// 最近一次提交时的文本校验结果（只用其错误标记）。
     text_errors: Option<TextEdits>,
@@ -103,6 +108,22 @@ impl ShareSettingsView {
                         && text.bytes().all(|b| b.is_ascii_digit() || b == b'.')
                 })
         });
+        let daily_cap_hint = daily_cap_hint(
+            translator.read(cx),
+            hub.read(cx)
+                .state()
+                .policy_summary
+                .provide_daily_cap_default_bytes,
+        );
+        let daily_cap = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(daily_cap_text(config.provide_daily_cap_bytes))
+                .placeholder(daily_cap_hint)
+                .validate(|text, _| {
+                    text.len() <= DAILY_CAP_MAX_CHARS
+                        && text.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                })
+        });
         let extra_addrs = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(EXTRA_ADDRS_ROWS.0, EXTRA_ADDRS_ROWS.1)
@@ -122,6 +143,7 @@ impl ShareSettingsView {
                         }
                     }
                 }
+                this.refresh_daily_cap_hint(window, cx);
                 cx.notify();
             }),
             cx.observe_in(&translator, window, |this, translator, window, cx| {
@@ -142,10 +164,11 @@ impl ShareSettingsView {
                 this.extra_addrs.update(cx, |input, cx| {
                     input.set_placeholder(addrs_hint, window, cx)
                 });
+                this.refresh_daily_cap_hint(window, cx);
                 cx.notify();
             }),
         ];
-        for input in [&udp_v4, &udp_v6, &rate] {
+        for input in [&udp_v4, &udp_v6, &rate, &daily_cap] {
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
@@ -169,6 +192,7 @@ impl ShareSettingsView {
             udp_v6,
             extra_addrs,
             rate,
+            daily_cap,
             rate_unit,
             text_errors: None,
             text_generation: 0,
@@ -177,5 +201,30 @@ impl ShareSettingsView {
             inflight: 0,
             _subscriptions: subscriptions,
         }
+    }
+}
+
+/// 每日上限输入的占位文字：「默认（{云端缺省}）」；缺省为 0 = 不限。
+fn daily_cap_hint(translator: &Translator, default_bytes: u64) -> String {
+    let value = if default_bytes == 0 {
+        translator.text("shareUsageUnlimited").to_owned()
+    } else {
+        format_bytes(default_bytes)
+    };
+    translator.text_with("shareSetProvideDailyCapDefault", &[("value", &value)])
+}
+
+impl ShareSettingsView {
+    fn refresh_daily_cap_hint(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let hint = daily_cap_hint(
+            self.translator.read(cx),
+            self.hub
+                .read(cx)
+                .state()
+                .policy_summary
+                .provide_daily_cap_default_bytes,
+        );
+        self.daily_cap
+            .update(cx, |input, cx| input.set_placeholder(hint, window, cx));
     }
 }

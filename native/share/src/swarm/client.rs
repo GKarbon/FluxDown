@@ -107,6 +107,11 @@ pub(crate) struct PeerSlot {
 }
 
 impl PeerSlot {
+    /// 对端 endpoint ID。
+    pub(crate) fn id(&self) -> EndpointId {
+        self.id
+    }
+
     fn new(id: EndpointId, addr_hint: Option<EndpointAddr>) -> Self {
         Self {
             id,
@@ -251,8 +256,21 @@ impl SwarmState {
             .collect();
         {
             let mut tickets = lock(&self.tickets);
+            let mut renewed: Vec<u32> = Vec::new();
             for file in &files {
-                tickets.insert(file.file_index, file.ticket.clone());
+                let previous = tickets.insert(file.file_index, file.ticket.clone());
+                if previous.as_ref().is_some_and(|old| *old != file.ticket) {
+                    renewed.push(file.file_index);
+                }
+            }
+            drop(tickets);
+            // 票据换新：让所有持有该文件授权的对端在旧票过期前用新票重新授权。
+            if !renewed.is_empty() {
+                for slot in lock(&self.peers).iter() {
+                    for index in &renewed {
+                        slot.with_file(*index, |f| f.granted = false);
+                    }
+                }
             }
         }
         let seen: HashSet<EndpointId> = files

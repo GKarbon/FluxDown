@@ -110,10 +110,11 @@ export const MAX_REPORT_DETAIL = 2000;
 export const MAX_REPORT_CONTACT = 200;
 
 /** 举报原因的页面键；发给 FluxCloud 的是 `REPORT_REASON_VALUE` 里的固定中文文本（后台审核员阅读）。 */
-export const REPORT_REASON_KEYS = ["copyright", "illegal", "malware", "other"] as const;
+export const REPORT_REASON_KEYS = ["copyright", "porn", "illegal", "malware", "other"] as const;
 export type ReportReasonKey = (typeof REPORT_REASON_KEYS)[number];
 export const REPORT_REASON_VALUE: Record<ReportReasonKey, string> = {
   copyright: "侵权",
+  porn: "色情低俗",
   illegal: "违法违规",
   malware: "恶意软件",
   other: "其他",

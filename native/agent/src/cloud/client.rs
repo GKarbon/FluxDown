@@ -71,6 +71,7 @@ impl CloudClient {
                 message: "account-scoped response belongs to an ended session".to_owned(),
                 retryable: false,
                 unreachable: false,
+                details: None,
             });
         }
         Ok(state)
@@ -391,6 +392,7 @@ impl CloudClient {
             session.user = profile.user;
             session.entitlements = profile.entitlements;
             session.current_plan = profile.current_plan;
+            session.active_subscription = profile.active_subscription;
             let updated = session.clone();
             if let Some(events) = &self.events {
                 events.publish(AgentEvent::SessionChanged(Box::new(Some(updated.clone()))));
@@ -900,6 +902,7 @@ fn error_from_body(status: u16, retryable: bool, body: &[u8]) -> CloudError {
             code: parsed.code,
             retryable,
             unreachable: false,
+            details: parsed.details.map(Box::new),
         },
         _ => {
             let text = String::from_utf8_lossy(body);
@@ -915,6 +918,7 @@ fn error_from_body(status: u16, retryable: bool, body: &[u8]) -> CloudError {
                 },
                 retryable,
                 unreachable: false,
+                details: None,
             }
         }
     }
@@ -994,6 +998,8 @@ pub struct CloudError {
     pub retryable: bool,
     /// 网络 / TLS / DNS / 超时：请求没能到达云端或响应没能读完。
     pub unreachable: bool,
+    /// 云端错误体里的 `details`（如 `swarm_quota_exhausted` 的 `retryAfterSecs`）。
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 impl CloudError {
@@ -1004,6 +1010,7 @@ impl CloudError {
             message: "authentication required".to_owned(),
             retryable: false,
             unreachable: false,
+            details: None,
         }
     }
 
@@ -1014,6 +1021,7 @@ impl CloudError {
             message: "FluxCloud endpoint is fixed in release builds".to_owned(),
             retryable: false,
             unreachable: false,
+            details: None,
         }
     }
 
@@ -1025,6 +1033,7 @@ impl CloudError {
             message,
             retryable: true,
             unreachable: true,
+            details: None,
         }
     }
 
@@ -1036,6 +1045,7 @@ impl CloudError {
             message,
             retryable: false,
             unreachable: false,
+            details: None,
         }
     }
 
@@ -1050,6 +1060,7 @@ impl CloudError {
             message,
             retryable: false,
             unreachable: false,
+            details: None,
         }
     }
 
@@ -1092,6 +1103,7 @@ impl CloudError {
             Some("plan_already_owned") => Some(ErrorReason::PlanAlreadyOwned),
             Some("not_an_upgrade") => Some(ErrorReason::PlanNotUpgrade),
             Some("plan_tier_not_higher") => Some(ErrorReason::PlanTierNotHigher),
+            Some("subscription_conflict") => Some(ErrorReason::SubscriptionConflict),
             Some("referral_code_invalid") => Some(ErrorReason::ReferralCodeInvalid),
             Some("referral_self_use") => Some(ErrorReason::ReferralSelfUse),
             Some("referral_already_used") => Some(ErrorReason::ReferralAlreadyUsed),
@@ -1140,6 +1152,7 @@ impl CloudError {
                 | ErrorReason::PlanAlreadyOwned
                 | ErrorReason::PlanNotUpgrade
                 | ErrorReason::PlanTierNotHigher
+                | ErrorReason::SubscriptionConflict
                 | ErrorReason::ReferralCodeTaken,
             ) => (ApplicationErrorCode::Conflict, false),
             Some(
@@ -2184,6 +2197,7 @@ mod tests {
             message: String::new(),
             retryable: status == 429,
             unreachable: false,
+            details: None,
         };
         let cases = [
             (
@@ -2241,6 +2255,7 @@ mod tests {
             message: String::new(),
             retryable: false,
             unreachable: false,
+            details: None,
         };
         let cases = [
             (
@@ -2277,6 +2292,12 @@ mod tests {
                 422,
                 "plan_tier_not_higher",
                 ErrorReason::PlanTierNotHigher,
+                ApplicationErrorCode::Conflict,
+            ),
+            (
+                409,
+                "subscription_conflict",
+                ErrorReason::SubscriptionConflict,
                 ApplicationErrorCode::Conflict,
             ),
             (

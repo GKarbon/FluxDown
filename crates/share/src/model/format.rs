@@ -57,7 +57,7 @@ pub fn claimed_summary(claim_count: u32, max_claims: u32) -> (&'static str, u32,
     }
 }
 
-const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
 
 /// 字节数的人类可读形式（1024 进制，KB 起保留一位小数）。
 #[must_use]
@@ -191,7 +191,8 @@ mod tests {
         assert_eq!(format_bytes(1023), "1023 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
-        assert_eq!(format_bytes(u64::MAX), "16777216.0 TB");
+        assert_eq!(format_bytes(u64::MAX), "16384.0 PB");
+        assert_eq!(format_bytes(1 << 50), "1.0 PB");
         assert_eq!(format_rate(2048), "2.0 KB/s");
     }
 

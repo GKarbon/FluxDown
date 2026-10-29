@@ -132,12 +132,17 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::ShareOwnShare => "errReasonShareOwnShare",
         ErrorReason::ShareSourceMissing => "errReasonShareSourceMissing",
         ErrorReason::ShareSwarmLocked => "errReasonShareSwarmLocked",
+        ErrorReason::ShareSwarmQuotaExhausted => "errReasonShareSwarmQuotaExhausted",
+        ErrorReason::ShareSwarmLoginRequired => "errReasonShareSwarmLoginRequired",
+        ErrorReason::ShareStrikeLimited => "errReasonShareStrikeLimited",
+        ErrorReason::ShareAppealExists => "errReasonShareAppealExists",
         ErrorReason::PaymentDisabled
         | ErrorReason::PaymentGatewayFailed
         | ErrorReason::PlanNotPurchasable
         | ErrorReason::PlanAlreadyOwned
         | ErrorReason::PlanNotUpgrade
         | ErrorReason::PlanTierNotHigher
+        | ErrorReason::SubscriptionConflict
         | ErrorReason::ReferralCodeInvalid
         | ErrorReason::ReferralSelfUse
         | ErrorReason::ReferralAlreadyUsed

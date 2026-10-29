@@ -1,8 +1,8 @@
 //! 状态派生：本机网络健康度与摘要行、路径 / NAT / 分享状态的文案键、分享列表排序。
 
 use fluxdown_protocol::{
-    ShareCloudState, ShareDto, ShareNatType, ShareNetStatusDto, SharePathKind, ShareProvideState,
-    ShareReceiveStatus, ShareStatus,
+    ShareAppealStatus, ShareCloudState, ShareDto, ShareNatType, ShareNetStatusDto, SharePathKind,
+    ShareProvideState, ShareReceiveStatus, ShareStatus,
 };
 
 /// 本机作为分享方「别人此刻能否找到并直连」的粗分级，驱动状态点颜色与文案。
@@ -138,6 +138,7 @@ pub const fn share_status_key(status: ShareStatus) -> &'static str {
         ShareStatus::Expired => "shareStatusExpired",
         ShareStatus::Stopped => "shareStatusStopped",
         ShareStatus::Unknown => "shareStatusUnknown",
+        ShareStatus::Takedown => "shareStatusTakedown",
     }
 }
 
@@ -199,6 +200,35 @@ impl ShareAction {
     }
 }
 
+/// 下架分享的申诉入口状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppealUi {
+    /// 已下架且尚未申诉：可发起申诉。
+    CanAppeal,
+    /// 申诉处理中。
+    Pending,
+    /// 申诉未通过。
+    Rejected,
+    /// 不显示申诉相关入口。
+    None,
+}
+
+/// 由分享状态与申诉记录推导申诉入口。
+#[must_use]
+pub fn appeal_state(share: &ShareDto) -> AppealUi {
+    if share.status != ShareStatus::Takedown {
+        return AppealUi::None;
+    }
+    match &share.appeal {
+        None => AppealUi::CanAppeal,
+        Some(appeal) => match appeal.status {
+            ShareAppealStatus::Pending => AppealUi::Pending,
+            ShareAppealStatus::Rejected => AppealUi::Rejected,
+            ShareAppealStatus::Approved | ShareAppealStatus::Unknown => AppealUi::None,
+        },
+    }
+}
+
 /// 一组选中分享上各批量操作是否可用（至少有一项适用）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BatchActions {
@@ -234,14 +264,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fluxdown_protocol::{
-        ShareCloudState, ShareDto, ShareFileDto, ShareHomeRelayDto, ShareNatType,
-        ShareNetStatusDto, ShareStatus,
+        ShareAppealDto, ShareAppealStatus, ShareCloudState, ShareDto, ShareFileDto,
+        ShareHomeRelayDto, ShareNatType, ShareNetStatusDto, ShareStatus,
     };
 
     use super::{
-        BatchActions, NetHealth, NetSegment, ShareAction, batch_actions, home_relay_latency,
-        is_editable, net_health, net_segments, ordered_shares, share_headline,
-        source_missing_badge,
+        AppealUi, BatchActions, NetHealth, NetSegment, ShareAction, appeal_state, batch_actions,
+        home_relay_latency, is_editable, net_health, net_segments, ordered_shares, share_headline,
+        share_status_key, source_missing_badge,
     };
 
     fn net() -> ShareNetStatusDto {
@@ -323,6 +353,34 @@ mod tests {
         assert_eq!(order, ["b", "d", "a", "c"]);
         assert!(is_editable(&shares[1]));
         assert!(!is_editable(&shares[0]));
+    }
+
+    #[test]
+    fn takedown_only_allows_delete_and_appeal_follows_record() {
+        let mut share = ShareDto {
+            status: ShareStatus::Takedown,
+            ..ShareDto::default()
+        };
+        assert!(!ShareAction::Start.applies(&share));
+        assert!(!ShareAction::Stop.applies(&share));
+        assert!(ShareAction::Delete.applies(&share));
+        assert_eq!(share_status_key(share.status), "shareStatusTakedown");
+        assert_eq!(appeal_state(&share), AppealUi::CanAppeal);
+        let mut appeal = ShareAppealDto {
+            status: ShareAppealStatus::Pending,
+            ..ShareAppealDto::default()
+        };
+        share.appeal = Some(appeal.clone());
+        assert_eq!(appeal_state(&share), AppealUi::Pending);
+        appeal.status = ShareAppealStatus::Rejected;
+        share.appeal = Some(appeal.clone());
+        assert_eq!(appeal_state(&share), AppealUi::Rejected);
+        appeal.status = ShareAppealStatus::Approved;
+        share.appeal = Some(appeal);
+        assert_eq!(appeal_state(&share), AppealUi::None);
+        share.status = ShareStatus::Active;
+        share.appeal = None;
+        assert_eq!(appeal_state(&share), AppealUi::None);
     }
 
     #[test]

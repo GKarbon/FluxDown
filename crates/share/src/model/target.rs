@@ -17,6 +17,7 @@ pub enum ManageTab {
     #[default]
     Mine,
     Received,
+    Usage,
     Network,
 }
 

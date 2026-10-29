@@ -14,7 +14,7 @@
 //! 直连刚判定离线时进入一段冷却期：冷却期内、且有可用来源时不再为每个块白等连接超时，
 //! 直接走来源；冷却结束（或来源全部失败）后再试一次直连，恢复后自动切回。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -194,6 +194,8 @@ struct Inner {
     source_bytes: Arc<SourceCounters>,
     /// 已经计入某个终态报告的来源字节。
     reported: Mutex<SourceBytes>,
+    /// 已经计入某个终态报告的逐对端字节。
+    reported_peers: Mutex<HashMap<String, u64>>,
     /// 来源块的校验失败次数（直连的失败由连接监测器统计）。
     source_verify_failures: AtomicU64,
     /// 最近一个交付块的来源：`None` = iroh（直连 / 中继）。
@@ -222,6 +224,10 @@ impl Drop for Inner {
 
 impl Inner {
     fn mark_reported(&self, summary: &SessionSummary) {
+        *self
+            .reported_peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = self.source_bytes.per_peer_all();
         let mut reported = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
         reported.cdn += summary.bytes.cdn;
         reported.bridge += summary.bytes.bridge;
@@ -231,6 +237,15 @@ impl Inner {
     /// 没有（或不再有）连接监测器承载的来源字节：补发一条终态会话报告，保证计量不丢。
     fn flush_source_report(&self) {
         let total = self.source_bytes.snapshot();
+        let peer_bytes = {
+            let mut rp = self
+                .reported_peers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let delta = self.source_bytes.per_peer_delta(&rp);
+            *rp = self.source_bytes.per_peer_all();
+            delta
+        };
         let pending = {
             let mut reported = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
             let pending = SourceBytes {
@@ -274,6 +289,7 @@ impl Inner {
             },
             samples: Vec::new(),
             swarm_files: Vec::new(),
+            peer_bytes,
             is_final: true,
         };
         self.endpoint.observers().report_session(&report);
@@ -312,6 +328,7 @@ impl ReceiveSession {
                 sources: Mutex::new(SourceState::default()),
                 source_bytes: Arc::new(SourceCounters::default()),
                 reported: Mutex::new(SourceBytes::default()),
+                reported_peers: Mutex::new(HashMap::new()),
                 source_verify_failures: AtomicU64::new(0),
                 active: watch::channel(None).0,
                 started_unix_ms: now_unix_ms(),
@@ -794,7 +811,9 @@ impl ReceiveSession {
             .await
         {
             Ok(data) => {
-                self.inner.source_bytes.add_peer(data.len() as u64);
+                self.inner
+                    .source_bytes
+                    .add_peer(&peer.id().to_z32(), data.len());
                 Ok((data, None))
             }
             Err(e) => {
@@ -1060,6 +1079,12 @@ impl ReceiveSession {
                         .reported
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner),
+                    base_peers: self
+                        .inner
+                        .reported_peers
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone(),
                 }),
             },
         );

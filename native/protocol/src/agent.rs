@@ -131,6 +131,41 @@ pub struct CloudPlan {
     pub campaign: Option<CloudPlanCampaign>,
     #[serde(default = "default_true")]
     pub purchasable: bool,
+    /// 产品形态：会员（永久 / 会员卡）或流量包。
+    #[serde(default)]
+    pub product_kind: CloudProductKind,
+    /// 流量包规格（`productKind = pack` 时存在）。
+    #[serde(default)]
+    pub pack: Option<CloudPack>,
+    /// 周期会员卡的周期天数；`None` = 永久套餐（或流量包）。
+    #[serde(default)]
+    pub billing_period_days: Option<u32>,
+}
+
+/// 套餐产品形态（`CloudPlan.productKind`）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum CloudProductKind {
+    /// 会员套餐。
+    #[default]
+    Membership,
+    /// 流量包（消耗品，可重复购买、叠加）。
+    Pack,
+    /// 对端发送了本端不认识的形态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 流量包规格。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct CloudPack {
+    pub kind: crate::ShareTrafficKind,
+    pub bytes: u64,
+    /// 支付后有效天数。
+    pub valid_days: u32,
 }
 
 fn default_badge_style() -> String {
@@ -162,6 +197,22 @@ pub struct CloudProfile {
     pub current_plan: Option<CloudPlan>,
     #[serde(default)]
     pub purchase_credit_minor: i64,
+    /// 当前生效的周期会员卡；没有为 `None`。
+    #[serde(default)]
+    pub active_subscription: Option<CloudSubscription>,
+}
+
+/// 生效中的周期会员卡（手动续费；到期回到永久套餐权益）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct CloudSubscription {
+    pub plan_code: String,
+    pub plan_name: String,
+    /// 开始时间（RFC 3339）。
+    pub starts_at: String,
+    /// 到期时间（RFC 3339）。
+    pub ends_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -276,6 +327,9 @@ pub struct AgentSessionDto {
     pub entitlements: Entitlements,
     pub current_plan: Option<CloudPlan>,
     pub device: CloudDevice,
+    /// 当前生效的周期会员卡；没有为 `None`。
+    #[serde(default)]
+    pub active_subscription: Option<CloudSubscription>,
 }
 
 /// 邮箱或设备验证步骤的无令牌元数据。

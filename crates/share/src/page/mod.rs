@@ -8,6 +8,7 @@ mod mine;
 mod received;
 mod table;
 mod toolbar;
+mod usage;
 
 use std::{collections::HashSet, time::Instant};
 
@@ -30,6 +31,7 @@ use crate::{
     model::{ManageTab, records::ReceivedFeed, refresh::VisibleRefresh},
     network::NetworkTab,
 };
+use usage::UsageTab;
 
 /// 接收记录首页两次取数之间的最短间隔（毫秒）。
 const RECORDS_MIN_REFRESH_MS: u64 = 1_000;
@@ -43,6 +45,7 @@ pub struct ShareView {
     input_invalid: bool,
     tab: ManageTab,
     network: Entity<NetworkTab>,
+    usage: Entity<UsageTab>,
     /// 正在提交操作（停止 / 开始 / 删除）的分享 ID，防重入。
     busy: HashSet<String>,
     /// 「我的分享」多选集合（分享 ID）；分享从列表消失时在 `absorb_hub` 里剔除。
@@ -79,6 +82,7 @@ impl ShareView {
         cx.observe(&hub, |this, _, cx| this.absorb_hub(cx)).detach();
         cx.observe(&translator, |_, _, cx| cx.notify()).detach();
         let network = cx.new(|cx| NetworkTab::new(hub.clone(), window, cx));
+        let usage = UsageTab::create(hub.clone(), cx);
 
         let mut view = Self {
             hub,
@@ -88,6 +92,7 @@ impl ShareView {
             input_invalid: false,
             tab: ManageTab::Mine,
             network,
+            usage,
             busy: HashSet::new(),
             selected: HashSet::new(),
             feed: ReceivedFeed::default(),
@@ -180,6 +185,14 @@ impl Render for ShareView {
                 self.refresh_records_if_needed(cx);
                 self.render_received(&translator, cx).into_any_element()
             }
+            ManageTab::Usage => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(self.usage.clone())
+                .into_any_element(),
             ManageTab::Network => div()
                 .flex()
                 .flex_col()

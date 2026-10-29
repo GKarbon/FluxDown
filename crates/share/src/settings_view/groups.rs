@@ -347,6 +347,23 @@ impl ShareSettingsView {
             Self::set_auto_provide,
             cx,
         );
+        let daily_cap = h_flex()
+            .gap(tokens.spacing.sm)
+            .items_center()
+            .child(
+                Input::new(&self.daily_cap)
+                    .control(cx)
+                    .disabled(!self.editable(cx))
+                    .w(active_theme(cx).text_extent(NUMBER_WIDTH)),
+            )
+            // 单位是国际通用缩写，不走翻译。
+            .child(div().text_color(tokens.colors.muted_foreground).child("GB"))
+            .into_any_element();
+        let daily_cap_error = self
+            .text_errors
+            .as_ref()
+            .is_some_and(|edits| edits.daily_cap_invalid)
+            .then(|| text(translator, "shareSetErrDailyCap"));
         let rows = vec![
             setting_row(
                 RowSpec::new(
@@ -356,6 +373,18 @@ impl ShareSettingsView {
                     "shareSetAutoProvideDesc",
                     auto_provide,
                 ),
+                window,
+                cx,
+            ),
+            setting_row(
+                RowSpec::new(
+                    translator,
+                    "provide-daily-cap",
+                    "shareSetProvideDailyCap",
+                    "shareSetProvideDailyCapDesc",
+                    daily_cap,
+                )
+                .error(daily_cap_error),
                 window,
                 cx,
             ),

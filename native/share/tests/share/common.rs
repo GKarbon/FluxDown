@@ -101,6 +101,7 @@ pub fn payload(sid: &str, rep: &str, exp: u64) -> TicketPayload {
         exp,
         scope: "recv".into(),
         root: None,
+        pri: 0,
     }
 }
 

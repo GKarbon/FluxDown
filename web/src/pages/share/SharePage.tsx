@@ -1,18 +1,20 @@
 // FluxMesh页（活动栏路由 `/share`，可隐藏）：顶部 6 位取件码 / 分享链接输入框，下方三个页签
-// [我的分享 | 接收记录 | 网络诊断]。对应 GPUI `crates/share` 的管理页。
+// [我的分享 | 接收记录 | 额度与贡献 | 网络诊断]。对应 GPUI `crates/share` 的管理页。
 
+import { useSearch } from '@tanstack/react-router'
 import { Share2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useT } from '../../i18n'
 import { Button, EmptyState, FieldError, Input, SegmentedTabs } from '../../ui'
 import { MyShares } from './MyShares'
 import { NetworkDiagnostics } from './NetworkDiagnostics'
 import { ReceiveRecords } from './ReceiveRecords'
+import { UsageTab } from './UsageTab'
 import { formatPickupCode, parseShareInput } from './model'
 import { useShareAvailable } from './state'
 import { openShareReceive } from './store'
 
-type Tab = 'mine' | 'received' | 'network'
+type Tab = 'mine' | 'received' | 'usage' | 'network'
 
 /** 取件码框：纯数字时按 `123 456` 分组显示；链接原样保留。 */
 function displayInput(value: string): string {
@@ -70,7 +72,11 @@ function PickupBox() {
 export function SharePage() {
   const t = useT()
   const available = useShareAvailable()
-  const [tab, setTab] = useState<Tab>('mine')
+  const search = useSearch({ strict: false }) as { tab?: Tab }
+  const [tab, setTab] = useState<Tab>(search.tab ?? 'mine')
+  useEffect(() => {
+    if (search.tab) setTab(search.tab)
+  }, [search.tab])
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col bg-surface text-foreground">
@@ -87,6 +93,7 @@ export function SharePage() {
               items={[
                 { value: 'mine', label: t('shareTabMine') },
                 { value: 'received', label: t('shareTabReceived') },
+                { value: 'usage', label: t('shareTabUsage') },
                 { value: 'network', label: t('shareTabNetwork') },
               ]}
             />
@@ -101,6 +108,8 @@ export function SharePage() {
             <MyShares />
           ) : tab === 'received' ? (
             <ReceiveRecords />
+          ) : tab === 'usage' ? (
+            <UsageTab />
           ) : (
             <NetworkDiagnostics />
           )}

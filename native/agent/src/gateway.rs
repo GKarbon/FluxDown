@@ -671,6 +671,9 @@ impl GatewayService {
             | method::AGENT_SHARE_SESSION_KILL
             | method::AGENT_SHARE_CONVERT_TO_CLOUD
             | method::AGENT_SHARE_DELETE_CLOUD_COPY
+            | method::AGENT_SHARE_REPORT
+            | method::AGENT_SHARE_APPEAL
+            | method::AGENT_SHARE_USAGE_REFRESH
             | method::AGENT_SHARE_STOP_PROVIDING => {
                 self.share_rpc(&request.method, request.params).await
             }
@@ -1193,7 +1196,15 @@ impl GatewayService {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
         let order_no = required_string(&params, "orderNo")?;
-        cloud_value(self.cloud.order(&order_no).await)
+        let result = self.cloud.order(&order_no).await;
+        #[cfg(feature = "share-p2p")]
+        if let (Ok(order), Some(share)) = (&result, &self.share)
+            && order.get("status").and_then(serde_json::Value::as_str) == Some("paid")
+        {
+            let share = share.clone();
+            tokio::spawn(async move { share.on_order_paid().await });
+        }
+        cloud_value(result)
     }
 
     async fn referral_list_codes(
@@ -2695,6 +2706,7 @@ mod tests {
                     entitlements: session.entitlements.clone(),
                     current_plan: session.current_plan.clone(),
                     purchase_credit_minor: 0,
+                    active_subscription: session.active_subscription.clone(),
                 })
                 .expect("decoded profile fixture")
             };

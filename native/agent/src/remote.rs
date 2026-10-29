@@ -850,7 +850,7 @@ impl RemoteTaskService {
                 }
                 return Ok(Some(SseEnd::Resync));
             }
-            "share.claimed" | "share.sessionKill" | "share.changed" => {
+            "share.claimed" | "share.sessionKill" | "share.changed" | "share.usage" => {
                 if let Some(feed) = &self.share_feed
                     && feed.send(event.clone()).is_err()
                 {

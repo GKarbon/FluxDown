@@ -25,6 +25,18 @@ fn yes() -> bool {
     true
 }
 
+/// `GET /share/config` 的 `swarm` 段。
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CloudSwarmPolicy {
+    /// 提供方为优先请求保留的连接槽位数。
+    #[serde(default)]
+    pub priority_reserved_slots: u32,
+    /// 每日共享上传上限的云端缺省值（字节，0 = 不限）。
+    #[serde(default)]
+    pub provide_daily_cap_default_bytes: u64,
+}
+
 /// `GET /share/config`。
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +60,9 @@ pub(super) struct CloudConfig {
     #[serde(default)]
     pub cloud_enabled: bool,
     pub network: NetworkPolicy,
+    /// 共享加速策略（旧服务端没有该字段：全 0，即现状）。
+    #[serde(default)]
+    pub swarm: CloudSwarmPolicy,
 }
 
 impl CloudConfig {
@@ -87,6 +102,8 @@ impl CloudConfig {
                 })
                 .collect(),
             hole_punch_hint_secs: self.network.hole_punch_hint_secs,
+            swarm_priority_reserved_slots: self.swarm.priority_reserved_slots,
+            provide_daily_cap_default_bytes: self.swarm.provide_daily_cap_default_bytes,
         }
     }
 
@@ -175,6 +192,12 @@ pub(super) struct CloudShare {
     /// 管理员已关闭并锁定该分享的共享；旧云端不带。
     #[serde(default)]
     pub swarm_locked: bool,
+    /// 下架原因（仅 takedown 状态带）。
+    #[serde(default)]
+    pub takedown_reason: Option<String>,
+    /// 下架申诉（提交过才有）。
+    #[serde(default)]
+    pub appeal: Option<fluxdown_protocol::ShareAppealDto>,
 }
 
 impl CloudShare {
@@ -200,7 +223,8 @@ impl CloudShare {
         match self.status.as_str() {
             "active" => ShareStatus::Active,
             "expired" => ShareStatus::Expired,
-            "stopped" | "takedown" => ShareStatus::Stopped,
+            "stopped" => ShareStatus::Stopped,
+            "takedown" => ShareStatus::Takedown,
             _ => ShareStatus::Unknown,
         }
     }
@@ -467,6 +491,28 @@ pub(super) fn share_error(error: &CloudError) -> RpcErrorData {
             Some((Code::NotFound, false, ErrorReason::ShareNotFound))
         }
         (_, Some(410)) => Some((Code::Conflict, false, ErrorReason::ShareStopped)),
+        (Some("swarm_quota_exhausted"), _) => {
+            Some((Code::Conflict, false, ErrorReason::ShareSwarmQuotaExhausted))
+        }
+        (Some("swarm_login_required"), _) => Some((
+            Code::Unauthorized,
+            false,
+            ErrorReason::ShareSwarmLoginRequired,
+        )),
+        (Some("share_strike_limited"), _) => {
+            let mut data = RpcErrorData::new(Code::Conflict, false)
+                .with_reason(ErrorReason::ShareStrikeLimited);
+            data.field = error
+                .details
+                .as_ref()
+                .and_then(|d| d.get("until"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            return data;
+        }
+        (Some("share_appeal_exists"), _) => {
+            Some((Code::Conflict, false, ErrorReason::ShareAppealExists))
+        }
         _ => None,
     };
     match mapped {

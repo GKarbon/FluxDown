@@ -8,8 +8,12 @@
 //! 计量：来源取回并通过校验的字节数按种类累计到 [`SessionBytes`](crate::SessionBytes) 的 `cdn` / `bridge`，
 //! 与云端按签发区间预占的计量口径一致（每个块恰好一次区间请求）。
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+use crate::types::{MAX_PEER_BYTES, PeerBytes};
 
 use bytes::Bytes;
 
@@ -102,6 +106,7 @@ pub(crate) struct SourceCounters {
     cdn: AtomicU64,
     bridge: AtomicU64,
     peer: AtomicU64,
+    per_peer: Mutex<HashMap<String, u64>>,
 }
 
 impl SourceCounters {
@@ -112,8 +117,45 @@ impl SourceCounters {
         };
     }
 
-    pub(crate) fn add_peer(&self, bytes: u64) {
+    pub(crate) fn add_peer(&self, from_z32: &str, bytes: usize) {
+        let bytes = bytes as u64;
         self.peer.fetch_add(bytes, Ordering::Relaxed);
+        let mut map = self.per_peer.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(v) = map.get_mut(from_z32) {
+            *v = v.saturating_add(bytes);
+        } else {
+            map.insert(from_z32.to_owned(), bytes);
+        }
+    }
+
+    /// 全部对端的累计字节（不排序、不截断）。
+    pub(crate) fn per_peer_all(&self) -> HashMap<String, u64> {
+        self.per_peer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// 相对 `base` 新增的逐对端字节，按 bytes 降序截取 [`MAX_PEER_BYTES`] 条。
+    pub(crate) fn per_peer_delta(&self, base: &HashMap<String, u64>) -> Vec<PeerBytes> {
+        let map = self.per_peer.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out: Vec<PeerBytes> = map
+            .iter()
+            .filter_map(|(k, v)| {
+                let bytes = v.saturating_sub(base.get(k).copied().unwrap_or(0));
+                (bytes > 0).then(|| PeerBytes {
+                    endpoint_id: k.clone(),
+                    bytes,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| a.endpoint_id.cmp(&b.endpoint_id))
+        });
+        out.truncate(MAX_PEER_BYTES);
+        out
     }
 
     pub(crate) fn snapshot(&self) -> SourceBytes {

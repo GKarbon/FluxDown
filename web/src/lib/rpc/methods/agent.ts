@@ -95,11 +95,14 @@ import type {
   ShareCreateParams,
   ShareConvertToCloudParams,
   ShareDiagnosticsDto,
+  ShareUsageDto,
   ShareDiagnosticsParams,
   ShareDto,
   ShareIdParams,
   ShareReceiveRecordDto,
   ShareStopProvidingParams,
+  ShareReportParams,
+  ShareAppealParams,
   ShareLocalConfigDto,
   ShareLogsDto,
   ShareLogsParams,
@@ -379,6 +382,8 @@ const share = {
     call<ShareTaskFactsDto>(METHOD.AGENT_SHARE_SWITCH_TO_BRIDGE, params),
   diagnostics: (params?: ShareDiagnosticsParams) =>
     call<ShareDiagnosticsDto>(METHOD.AGENT_SHARE_DIAGNOSTICS, params),
+  /** 刷新并返回额度与贡献；未登录返回 `null`。 */
+  usageRefresh: () => call<ShareUsageDto | null>(METHOD.AGENT_SHARE_USAGE_REFRESH),
   logs: (params?: ShareLogsParams) => call<ShareLogsDto>(METHOD.AGENT_SHARE_LOGS, params),
   /** 分享方强制中断一个接收方会话。 */
   sessionKill: (params: ShareSessionKillParams) => call<OkResult>(METHOD.AGENT_SHARE_SESSION_KILL, params),
@@ -389,6 +394,8 @@ const share = {
   deleteCloudCopy: (id: string) => call<ShareDto>(METHOD.AGENT_SHARE_DELETE_CLOUD_COPY, { id } satisfies ShareIdParams),
   /** 停止该次接收的共享（共享提供）；幂等。 */
   stopProviding: (params: ShareStopProvidingParams) => call<ShareReceiveRecordDto>(METHOD.AGENT_SHARE_STOP_PROVIDING, params),
+  report: (params: ShareReportParams) => call<OkResult>(METHOD.AGENT_SHARE_REPORT, params),
+  appeal: (params: ShareAppealParams) => call<ShareDto>(METHOD.AGENT_SHARE_APPEAL, params),
 };
 
 // 桌面集成：在 agent 所在主机上打开 / 定位任务产物。仅当本连接的 hello 带

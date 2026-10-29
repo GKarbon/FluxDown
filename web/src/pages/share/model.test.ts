@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import type { ShareDto, ShareNetStatusDto, ShareReceiveRecordDto, ShareTaskFactsDto } from '../../lib/rpc'
+import type { ShareUsageDto, ShareDto, ShareNetStatusDto, ShareReceiveRecordDto, ShareTaskFactsDto } from '../../lib/rpc'
 import {
+  appealState,
+  shareActionApplies,
+  boostLabel,
+  formatQuotaBytes,
+  grantSourceKey,
+  levelLabel,
+  usageMeters,
   CLOUD_STATE_KEYS,
   canStartShare,
   canStopShare,
@@ -219,6 +226,9 @@ describe('source badge', () => {
     expect(shareSourceBadge(facts({ pathKind: 'bridge' }))).toEqual({ pathKind: 'bridge', labelKey: 'shareBadgeBridge', tone: 'neutral', peers: 0 })
     expect(shareSourceBadge(facts({ pathKind: 'unknown' }))?.tone).toBe('neutral')
     expect(shareSourceBadge(facts({ pathKind: 'swarm', swarmPeers: 3 }))).toEqual({ pathKind: 'swarm', labelKey: 'sharePathSwarm', tone: 'success', peers: 3 })
+    expect(shareSourceBadge(facts({ swarmBlock: 'quotaExhausted' }))?.swarmBlockKey).toBe('shareSwarmQuotaChip')
+    expect(shareSourceBadge(facts({ swarmBlock: 'loginRequired' }))?.swarmBlockKey).toBe('shareSwarmLoginChip')
+    expect(shareSourceBadge(facts({ swarmBlock: 'unknown' }))?.swarmBlockKey).toBeUndefined()
     expect(sourceBytesRows({ direct: 0, relay: 0, cdn: 0, bridge: 0, peer: 9 }).map((row) => [row.kind, row.bytes]).at(-1)).toEqual(['peer', 9])
     expect(bytesSplit({ direct: 1, relay: 0, cdn: 0, bridge: 0, peer: 3 }).percent).toBe(25)
   })
@@ -504,5 +514,56 @@ describe('batch share actions', () => {
   test('selection drops shares that are gone', () => {
     const kept = pruneSelection(new Set(['a', 'b', 'c']), [{ id: 'a' }, { id: 'c' }])
     expect([...kept]).toEqual(['a', 'c'])
+  })
+})
+
+describe('usage helpers', () => {
+  test('formatQuotaBytes caps at 1 PB', () => {
+    expect(formatQuotaBytes(2 ** 50)).toBe('≥ 1 PB')
+    expect(formatQuotaBytes(2 ** 50 - 1).startsWith('≥')).toBe(false)
+    expect(formatQuotaBytes(1024)).toBe('1.0 KB')
+  })
+  test('boostLabel / levelLabel / grantSourceKey', () => {
+    expect(boostLabel(1000)).toBeNull()
+    expect(boostLabel(1500)).toBe('×1.5')
+    expect(boostLabel(2000)).toBe('×2')
+    expect(boostLabel(1250)).toBe('×1.25')
+    expect(levelLabel(3, 10)).toBe('Lv.3')
+    expect(grantSourceKey('admin')).toBe('shareUsageGrantGranted')
+    expect(grantSourceKey('free')).toBe('shareUsageGrantGranted')
+    expect(grantSourceKey('unknown')).toBe('shareUsageGrantGranted')
+    expect(grantSourceKey('pack')).toBe('shareUsageGrantPack')
+  })
+  test('usageMeters flags unlimited / exhausted and skips unknown kinds', () => {
+    const k = (kind: string, o: object) => ({ kind, unlimited: false, monthlyAllowance: 100, usedThisMonth: 50, remaining: 50, reserved: 0, ...o })
+    const usage = {
+      kinds: [k('swarm', { remaining: 0, usedThisMonth: 100 }), k('download', { unlimited: true }), k('upload', {}), k('weird', {})],
+    } as unknown as ShareUsageDto
+    const meters = usageMeters(usage)
+    expect(meters.map((m) => m.kind)).toEqual(['swarm', 'download', 'upload'])
+    expect(meters[0]).toMatchObject({ exhausted: true, ratio: 1 })
+    expect(meters[1]).toMatchObject({ unlimited: true, exhausted: false, ratio: 0 })
+    expect(meters[2].ratio).toBe(0.5)
+  })
+})
+
+describe('takedown', () => {
+  const taken = share({ id: 'taken', status: 'takedown', takedownReason: '侵权' })
+
+  test('display status and actions: only delete applies', () => {
+    expect(shareDisplayStatus(taken, Date.now())).toBe('takedown')
+    expect(shareActionApplies('start', taken)).toBe(false)
+    expect(shareActionApplies('stop', taken)).toBe(false)
+    expect(shareActionApplies('delete', taken)).toBe(true)
+    expect(shareActionApplies('stop', share({ id: 'a', status: 'active' }))).toBe(true)
+    expect(planShareBatch([taken])).toEqual({ start: [], stop: [], remove: [taken] })
+  })
+
+  test('appeal state', () => {
+    expect(appealState(taken)).toBe('canAppeal')
+    expect(appealState({ ...taken, appeal: { status: 'pending', createdAt: '2026-01-01T00:00:00Z' } })).toBe('pending')
+    expect(appealState({ ...taken, appeal: { status: 'rejected', createdAt: '2026-01-01T00:00:00Z' } })).toBe('rejected')
+    expect(appealState({ ...taken, appeal: { status: 'approved', createdAt: '2026-01-01T00:00:00Z' } })).toBe('none')
+    expect(appealState(share({ id: 'a', status: 'active' }))).toBe('none')
   })
 })

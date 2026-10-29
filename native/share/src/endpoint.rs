@@ -255,6 +255,23 @@ impl ShareEndpoint {
             bound.endpoint.network_change().await;
         }
     }
+
+    /// 更新共享提供策略：为优先请求保留的连接槽位数、每日提供上限（0 = 不限）与自然日的 UTC 偏移（秒）。
+    pub fn set_swarm_policy(&self, priority_reserved: usize, daily_cap: u64, utc_offset_secs: i64) {
+        self.shared
+            .sender
+            .set_swarm_policy(priority_reserved, daily_cap, utc_offset_secs);
+    }
+
+    /// 当前共享提供的（日序号，已提供字节），供宿主落盘。
+    pub fn swarm_daily_usage(&self) -> (i64, u64) {
+        self.shared.sender.swarm_daily_usage()
+    }
+
+    /// 启动时恢复落盘的当日共享提供用量。
+    pub fn restore_swarm_daily(&self, day: i64, used: u64) {
+        self.shared.sender.restore_swarm_daily(day, used);
+    }
 }
 
 // ───────────────────────── 策略装配 ─────────────────────────

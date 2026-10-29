@@ -9,7 +9,8 @@ import type { SelectOption } from '../../../../ui'
 import { claimOptions, tierLabel } from '../../../share/model'
 import { useShareState } from '../../../share/state'
 import { DropdownField, NumberField, SettingsPage, SettingsRow, SettingsSection, TextField } from '../../kit'
-import { formatAddrList, parseAddrList, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire, saveLocalConfig } from './localConfig'
+import { formatBytes } from '../../../downloads/dialogs/utils'
+import { formatDailyCap, formatAddrList, parseAddrList, parseDailyCap, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire, saveLocalConfig } from './localConfig'
 import type { PortmapperChoice } from './localConfig'
 
 const MODES: readonly ShareConnectionMode[] = ['auto', 'relayOnly', 'directOnly']
@@ -61,6 +62,7 @@ export function ShareSettings() {
     { value: 'off', label: t('shareNotifyOff') },
   ]
   const logOptions: SelectOption<ShareLogLevel>[] = LOG_LEVELS.map((level) => ({ value: level, label: t(LOG_KEYS[level]) }))
+  const defaultCap = policySummary.provideDailyCapDefaultBytes ?? 0
 
   return (
     <SettingsPage title={t('settingsCatShare')} description={t('settingsCatShareDesc')}>
@@ -168,6 +170,19 @@ export function ShareSettings() {
             checked={config.autoProvide !== false}
             aria-label={t('shareSetAutoProvide')}
             onCheckedChange={(on) => void saveLocalConfig({ autoProvide: on ? null : false })}
+          />
+        </SettingsRow>
+        <SettingsRow title={t('shareSetProvideDailyCap')} description={t('shareSetProvideDailyCapDesc')}>
+          <TextField
+            value={formatDailyCap(config.provideDailyCapBytes)}
+            placeholder={t('shareSetProvideDailyCapDefault', { value: defaultCap > 0 ? formatBytes(defaultCap) : t('shareUsageUnlimited') })}
+            aria-label={t('shareSetProvideDailyCap')}
+            className="w-40"
+            trailing={<span className="text-muted-foreground">GB</span>}
+            onCommit={(text) => {
+              const cap = parseDailyCap(text)
+              if (cap !== undefined) void saveLocalConfig({ provideDailyCapBytes: cap })
+            }}
           />
         </SettingsRow>
         <SettingsRow title={t('shareSetRateLimit')} description={t('shareSetRateLimitDesc')}>

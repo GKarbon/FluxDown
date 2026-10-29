@@ -164,6 +164,18 @@ pub(super) struct Inner {
     pub announce_at: Option<Instant>,
     /// 待向云端撤销的共享登记（文件根哈希）。
     pub withdraw: Vec<String>,
+    /// 最近一次成功拉取的额度与贡献（`usage.rs`）；未登录为 `None`。
+    pub usage: Option<fluxdown_protocol::ShareUsageDto>,
+    pub usage_error: Option<fluxdown_protocol::ErrorReason>,
+    pub usage_fetched_at: Option<Instant>,
+    /// 已安排一次防抖刷新，期间不再重复安排。
+    pub usage_debounce: bool,
+    /// 各分享的共享加速受限原因（`swarm.rs`）；查找成功即清除。
+    pub swarm_blocks: HashMap<String, fluxdown_protocol::ShareSwarmBlock>,
+    /// 因「需要登录」而停止的对端查找（适配器令牌 → 重试所需参数），登录后重新开始。
+    pub swarm_login_waiting: HashMap<String, super::swarm::LoginWaiting>,
+    /// 最近一次落盘的当日共享上传量。
+    pub daily_saved: Option<super::store::ProvideDaily>,
 }
 
 /// FluxMesh服务。
@@ -372,6 +384,7 @@ impl ShareService {
             adapter.shutdown().await;
         }
         if let Some(endpoint) = endpoint {
+            self.persist_daily().await;
             endpoint.shutdown().await;
         }
     }
@@ -709,7 +722,7 @@ impl ShareService {
 
     /// 任务状态变化后的收尾：移除已完成任务、关闭无人使用的会话、更新记录、调整端点。
     async fn after_task_change(&self) {
-        let (closing, adapter, records_changed, finished) = self.with(|i| {
+        let (closing, adapter, records_changed, completed, finished) = self.with(|i| {
             let done: Vec<String> = i
                 .receive_tasks
                 .iter()
@@ -726,6 +739,7 @@ impl ShareService {
             }
             let dirty: Vec<String> = i.dirty_records.drain().collect();
             let mut records_changed = false;
+            let mut completed = false;
             for record_id in dirty {
                 let remaining: Vec<&ReceiveTask> = i
                     .receive_tasks
@@ -743,6 +757,7 @@ impl ShareService {
                     && record.status != status
                 {
                     record.status = status;
+                    completed |= status == ShareReceiveStatus::Completed;
                     records_changed = true;
                 }
             }
@@ -769,13 +784,16 @@ impl ShareService {
             } else {
                 None
             };
-            (closing, adapter, records_changed, finished)
+            (closing, adapter, records_changed, completed, finished)
         });
         for session in closing {
             session.close().await;
         }
         if let Some(adapter) = adapter {
             adapter.shutdown().await;
+        }
+        if completed {
+            self.schedule_usage_refresh();
         }
         if records_changed {
             self.persist_records().await;

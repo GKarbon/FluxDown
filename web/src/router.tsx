@@ -47,7 +47,13 @@ const shellRoute = createRoute({
 const downloadsRoute = createRoute({ getParentRoute: () => shellRoute, path: '/', component: DownloadsPage })
 const rssRoute = createRoute({ getParentRoute: () => shellRoute, path: '/rss', component: RssPage })
 const webhooksRoute = createRoute({ getParentRoute: () => shellRoute, path: '/webhooks', component: WebhooksPage })
-const shareRoute = createRoute({ getParentRoute: () => shellRoute, path: '/share', component: SharePage })
+const shareRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/share',
+  component: SharePage,
+  validateSearch: (search: Record<string, unknown>): { tab?: 'mine' | 'received' | 'usage' | 'network' } =>
+    search.tab === 'mine' || search.tab === 'received' || search.tab === 'usage' || search.tab === 'network' ? { tab: search.tab } : {},
+})
 
 const pluginViewRoute = createRoute({
   getParentRoute: () => shellRoute,

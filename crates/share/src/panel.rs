@@ -333,6 +333,7 @@ fn status_color(status: ShareStatus, cx: &App) -> Hsla {
     match status {
         ShareStatus::Active => theme.extended().colors.success,
         ShareStatus::Expired => theme.extended().colors.warning,
+        ShareStatus::Takedown => theme.tokens().colors.destructive,
         ShareStatus::Stopped | ShareStatus::Unknown => theme.tokens().colors.muted_foreground,
     }
 }

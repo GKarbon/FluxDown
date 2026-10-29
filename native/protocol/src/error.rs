@@ -167,6 +167,8 @@ pub enum ErrorReason {
     PlanNotUpgrade,
     /// 套餐购买：已持有同档或更高档套餐（买断制只升不降）。
     PlanTierNotHigher,
+    /// 套餐购买：已有另一张生效中的周期会员卡。
+    SubscriptionConflict,
     /// 推介：邀请码无效（不存在 / 功能未开启）。
     ReferralCodeInvalid,
     /// 推介：不能使用自己的邀请码。
@@ -213,6 +215,15 @@ pub enum ErrorReason {
     ShareSourceMissing,
     /// FluxMesh：管理员已关闭并锁定该分享的共享，不能再打开。
     ShareSwarmLocked,
+    /// FluxMesh：本月共享加速额度已用完（任务仍可从分享方直连下完）。
+    ShareSwarmQuotaExhausted,
+    /// FluxMesh：共享加速需要登录（云端关闭了游客共享加速）。
+    ShareSwarmLoginRequired,
+    /// FluxMesh：所有者近期被下架次数达到上限，暂停发起 / 恢复分享。`RpcErrorData.field`
+    /// 携带解除时刻（RFC 3339），UI 据此填充文案里的时间。
+    ShareStrikeLimited,
+    /// FluxMesh：该分享已申诉过（每个下架分享只能申诉一次）。
+    ShareAppealExists,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

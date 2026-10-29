@@ -232,3 +232,57 @@ pub(crate) fn tooltip_builder(
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |window, cx| tooltip_view(label.clone(), window, cx)
 }
+
+/// 一条细进度条：左侧标签、右侧数值文字，下方 4px 轨道。`ratio = None` 不画轨道（不限）；
+/// `exhausted` 时数值与轨道变危险色。样式与设置页 `cloud_push::meter_row` 一致（share 不依赖 settings）。
+pub(crate) fn meter_row(
+    id: impl Into<ElementId>,
+    label: SharedString,
+    value: SharedString,
+    ratio: Option<f32>,
+    exhausted: bool,
+    cx: &App,
+) -> Div {
+    let tokens = active_theme(cx).tokens().clone();
+    let (fill, value_color) = if exhausted {
+        (tokens.colors.destructive, tokens.colors.destructive)
+    } else {
+        (tokens.colors.primary, tokens.colors.foreground)
+    };
+    v_flex()
+        .w_full()
+        .gap(tokens.spacing.xs)
+        .child(
+            h_flex()
+                .w_full()
+                .items_baseline()
+                .justify_between()
+                .gap(tokens.spacing.sm)
+                .child(body_text(cx).flex_shrink_0().child(label))
+                .child(
+                    meta_text(cx)
+                        .min_w_0()
+                        .truncate()
+                        .font_features(tabular_numbers())
+                        .text_color(value_color)
+                        .when(exhausted, |this| this.font_weight(FontWeight::MEDIUM))
+                        .child(value),
+                ),
+        )
+        .children(ratio.map(|ratio| {
+            div()
+                .id(id)
+                .w_full()
+                .h(gpui::px(4.))
+                .rounded_full()
+                .bg(tokens.colors.muted)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(ratio.clamp(0., 1.)))
+                        .rounded_full()
+                        .bg(fill),
+                )
+        }))
+}

@@ -21,7 +21,8 @@ import type {
   ShareTierDto,
   ShareUploadDto,
 } from '../../lib/rpc'
-import type { ErrorReason } from '../../lib/rpc'
+import { DISPLAY_BYTES_CAP } from '../../lib/rpc'
+import type { ErrorReason, ShareGrantSource, ShareTrafficKind, ShareUsageDto } from '../../lib/rpc'
 import { REASON_KEYS } from '../settings/sections/account/errorText'
 
 /** 取件码位数（云端 `pickupCodeLength`，固定 6）。 */
@@ -126,12 +127,13 @@ export function claimOptions(current: number): number[] {
 }
 
 /** 分享的展示状态：服务端 `active` 但已过期（清理任务尚未标记）按已过期呈现。 */
-export type ShareDisplayStatus = 'active' | 'expired' | 'stopped' | 'unknown'
+export type ShareDisplayStatus = 'active' | 'expired' | 'stopped' | 'takedown' | 'unknown'
 
 export function shareDisplayStatus(share: Pick<ShareDto, 'status' | 'expiresAt'>, nowMs: number): ShareDisplayStatus {
   const status: ShareStatus = share.status
   if (status === 'stopped') return 'stopped'
   if (status === 'expired') return 'expired'
+  if (status === 'takedown') return 'takedown'
   if (status !== 'active') return 'unknown'
   const expires = Date.parse(share.expiresAt)
   return Number.isFinite(expires) && expires <= nowMs ? 'expired' : 'active'
@@ -142,7 +144,27 @@ export const SHARE_STATUS_KEYS: Readonly<Record<ShareDisplayStatus, string>> = {
   active: 'shareStatusActive',
   expired: 'shareStatusExpired',
   stopped: 'shareStatusStopped',
+  takedown: 'shareStatusTakedown',
   unknown: 'shareStatusUnknown',
+}
+
+/** 单项操作是否适用：已下架的分享只允许删除（与 GPUI `ShareAction::applies` 一致）。 */
+export function shareActionApplies(action: 'start' | 'stop' | 'delete', share: Pick<ShareDto, 'status' | 'sourceMissing'>): boolean {
+  if (action === 'delete') return true
+  if (share.status === 'takedown') return false
+  return action === 'start' ? canStartShare(share) : canStopShare(share)
+}
+
+/** 下架申诉的界面状态：可申诉 / 处理中 / 未通过 / 无（与 GPUI `appeal_state` 一致）。 */
+export type AppealUi = 'canAppeal' | 'pending' | 'rejected' | 'none'
+
+export function appealState(share: Pick<ShareDto, 'status' | 'appeal'>): AppealUi {
+  if (share.status !== 'takedown') return 'none'
+  const appeal = share.appeal
+  if (appeal === undefined || appeal === null) return 'canAppeal'
+  if (appeal.status === 'pending') return 'pending'
+  if (appeal.status === 'rejected') return 'rejected'
+  return 'none'
 }
 
 /** 可以「开始分享」：已停止 / 已过期（以服务端状态为准，不含仅显示过期的有效分享）且源文件未缺失（恢复会清掉云端副本，回到实时分享）。 */
@@ -283,6 +305,8 @@ export interface ShareSourceBadge {
   tone: 'success' | 'warning' | 'neutral'
   /** 共享对端数；0 不显示。 */
   peers: number
+  /** 共享加速被云端拒绝时的 chip 文案键（点击进入额度页签）；无则 null。 */
+  swarmBlockKey?: string
 }
 
 const PATH_TONES: Readonly<Record<SharePathKind, ShareSourceBadge['tone']>> = {
@@ -297,7 +321,19 @@ const PATH_TONES: Readonly<Record<SharePathKind, ShareSourceBadge['tone']>> = {
 
 export function shareSourceBadge(facts: ShareTaskFactsDto | undefined): ShareSourceBadge | null {
   if (!facts || !facts.isShareReceive) return null
-  return { pathKind: facts.pathKind, labelKey: PATH_KIND_KEYS[facts.pathKind], tone: PATH_TONES[facts.pathKind], peers: facts.swarmPeers ?? 0 }
+  const swarmBlockKey = swarmBlockChipKey(facts.swarmBlock)
+  return {
+    pathKind: facts.pathKind,
+    labelKey: PATH_KIND_KEYS[facts.pathKind],
+    tone: PATH_TONES[facts.pathKind],
+    peers: facts.swarmPeers ?? 0,
+    ...(swarmBlockKey ? { swarmBlockKey } : {}),
+  }
+}
+
+/** 共享加速被拒时的弱化 chip 文案键；`unknown` / 缺省不显示。 */
+export function swarmBlockChipKey(block: ShareTaskFactsDto['swarmBlock']): string | null {
+  return block === 'quotaExhausted' ? 'shareSwarmQuotaChip' : block === 'loginRequired' ? 'shareSwarmLoginChip' : null
 }
 
 /** 「切换桥接」：进行中（等待 / 下载中）的FluxMesh接收任务、路径尚不是桥接时提供；`relayStuck` 时强调。 */
@@ -507,4 +543,82 @@ export function mergeReceiveRecords(live: readonly ShareReceiveRecordDto[], page
     return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
   }
   return [...byId.values()].sort((a, b) => time(b) - time(a))
+}
+
+// ───────────────────────── 额度与贡献（与 GPUI `crates/share/src/model/usage.rs` 同语义） ─────────────────────────
+
+/** 额度字节：≥ 展示封顶（1 PiB）显示 `≥ 1 PB`，否则按 `formatBytes`。 */
+export function formatQuotaBytes(bytes: number): string {
+  return bytes >= DISPLAY_BYTES_CAP ? '≥ 1 PB' : formatBytes(bytes)
+}
+
+export interface MeterView {
+  kind: ShareTrafficKind
+  labelKey: string
+  remaining: number
+  allowance: number
+  used: number
+  unlimited: boolean
+  exhausted: boolean
+  /** 已用占比 0..1。 */
+  ratio: number
+}
+
+const KIND_LABEL_KEYS: Partial<Record<ShareTrafficKind, string>> = {
+  swarm: 'shareUsageKindSwarm',
+  download: 'shareUsageKindDownload',
+  upload: 'shareUsageKindUpload',
+}
+
+/** 流量种类 → 名称键；unknown → null。 */
+export function trafficKindKey(kind: ShareTrafficKind): string | null {
+  return KIND_LABEL_KEYS[kind] ?? null
+}
+
+/** 三条额度条（保持云端顺序，跳过未知种类）。 */
+export function usageMeters(usage: ShareUsageDto): MeterView[] {
+  const meters: MeterView[] = []
+  for (const item of usage.kinds) {
+    const labelKey = trafficKindKey(item.kind)
+    if (!labelKey) continue
+    const exhausted = !item.unlimited && item.remaining <= 0
+    const ratio = item.unlimited ? 0 : exhausted ? 1 : item.monthlyAllowance > 0 ? Math.min(1, Math.max(0, item.usedThisMonth / item.monthlyAllowance)) : 0
+    meters.push({
+      kind: item.kind,
+      labelKey,
+      remaining: item.remaining,
+      allowance: item.monthlyAllowance,
+      used: item.usedThisMonth,
+      unlimited: item.unlimited,
+      exhausted,
+      ratio,
+    })
+  }
+  return meters
+}
+
+/** 额度来源 → 文案键；Admin / Free / Unknown 都是「系统赠送」。 */
+export function grantSourceKey(source: ShareGrantSource): string {
+  switch (source) {
+    case 'pack':
+      return 'shareUsageGrantPack'
+    case 'rollover':
+      return 'shareUsageGrantRollover'
+    case 'contribution':
+      return 'shareUsageGrantContribution'
+    default:
+      return 'shareUsageGrantGranted'
+  }
+}
+
+/** `Lv.N`；`max` 只用于判断满级（本函数不区分，保持签名与 GPUI 一致）。 */
+export function levelLabel(level: number, _max: number): string {
+  return `Lv.${level}`
+}
+
+/** 贡献加成：1000‰ → null；否则 `×1.5`（最多两位小数、去尾随 0）。 */
+export function boostLabel(permille: number): string | null {
+  if (permille === 1000) return null
+  const value = Math.round(permille / 10) / 100
+  return `×${value}`
 }

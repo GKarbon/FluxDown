@@ -268,6 +268,7 @@ export const METHOD = {
   /** 把接收任务切到实时桥接；任务继续运行，其 `pathKind` 在分块经桥接 / CDN 流动后变为 `bridge` / `cdn`。 */
   AGENT_SHARE_SWITCH_TO_BRIDGE: 'agent.share.switchToBridge',
   AGENT_SHARE_DIAGNOSTICS: 'agent.share.diagnostics',
+  AGENT_SHARE_USAGE_REFRESH: 'agent.share.usageRefresh',
   AGENT_SHARE_LOGS: 'agent.share.logs',
   AGENT_SHARE_SESSION_KILL: 'agent.share.sessionKill',
   /** 把实时分享转为云端暂存（需登录）；预检通过后立即返回 `cloudState = uploading`，上传在 agent 后台进行。 */
@@ -275,6 +276,10 @@ export const METHOD = {
   /** 删除云端副本（上传中则先取消）；分享回到实时模式。 */
   AGENT_SHARE_DELETE_CLOUD_COPY: 'agent.share.deleteCloudCopy',
   AGENT_SHARE_STOP_PROVIDING: 'agent.share.stopProviding',
+  /** 举报分享（按原因枚举，agent 用本机 endpoint 私钥签名）。 */
+  AGENT_SHARE_REPORT: 'agent.share.report',
+  /** 申诉已下架的分享，返回更新后的分享。 */
+  AGENT_SHARE_APPEAL: 'agent.share.appeal',
 
   /** 服务端推送通知，params 为 EventFrame。 */
   SERVICE_EVENT: 'service.event',

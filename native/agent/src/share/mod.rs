@@ -13,6 +13,7 @@
 //!   服务侧装配与启动续传、上传引擎（方案 → 秒传证明 → 分片 PUT → complete）、断点文件。
 
 mod cloud;
+mod compliance;
 mod convert;
 mod exit;
 mod guest;
@@ -28,6 +29,7 @@ mod time;
 mod upload;
 mod upload_job;
 mod upload_state;
+mod usage;
 
 #[cfg(test)]
 mod tests;

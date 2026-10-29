@@ -115,13 +115,18 @@ export type ErrorReason =
   | 'shareOwnShare'
   | 'shareSourceMissing'
   | 'shareSwarmLocked'
+  | 'shareSwarmQuotaExhausted'
+  | 'shareSwarmLoginRequired'
+  | 'shareStrikeLimited'
+  | 'shareAppealExists'
+  | 'subscriptionConflict'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */
 export interface RpcErrorData {
   code: ApplicationErrorCode;
   retryable: boolean;
-  /** 出错的参数字段名。 */
+  /** 出错的参数字段名；`shareStrikeLimited` 时携带解除时刻（RFC 3339）。 */
   field?: string;
   /** 乐观并发冲突时服务端当前版本（如 daemon.config.patch）。 */
   revision?: number;

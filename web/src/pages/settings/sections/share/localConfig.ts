@@ -38,6 +38,28 @@ export function rateFromWire(bytesPerSec: number | null): number {
   return bytesPerSec === null || bytesPerSec <= 0 ? 0 : bytesPerSec / MIB
 }
 
+const GIB = 1024 * 1024 * 1024
+
+/** 每日共享上传上限输入（GB）：空 = 跟随云端（`null`）；0 = 不限；正数 = GB×2^30；无效返回 `undefined`（调用方保持原值）。 */
+export function parseDailyCap(text: string): number | null | undefined {
+  const trimmed = text.trim()
+  if (trimmed === '') return null
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return undefined
+  const gb = Number.parseFloat(trimmed)
+  if (!Number.isFinite(gb)) return undefined
+  const bytes = Math.round(gb * GIB)
+  return bytes <= Number.MAX_SAFE_INTEGER ? bytes : undefined
+}
+
+/** 回显：`null` → 空串（显示占位）；字节 → GB（最多两位小数）。 */
+export function formatDailyCap(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return ''
+  return String(Math.round((bytes / GIB) * 100) / 100)
+}
+
+/** 本地时区偏移（秒）：随每次提交写入，供 agent 划分「当日」。 */
+export const localDayOffsetSecs = (): number => -new Date().getTimezoneOffset() * 60
+
 /** portmapper 三态：`null` = 自动（跟随云端默认）。 */
 export type PortmapperChoice = 'auto' | 'on' | 'off'
 
@@ -60,7 +82,7 @@ async function flush(): Promise<void> {
     const patch = pending
     pending = {}
     try {
-      base = await rpc.agent.share.setLocalConfig({ ...base, ...patch })
+      base = await rpc.agent.share.setLocalConfig({ ...base, ...patch, provideDayOffsetSecs: localDayOffsetSecs() })
     } catch (error) {
       pending = {}
       toast.error(t(accountErrorKey(error)))

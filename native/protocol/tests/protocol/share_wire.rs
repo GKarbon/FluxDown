@@ -3,12 +3,13 @@
 use std::collections::HashSet;
 
 use fluxdown_protocol::method::{
-    AGENT_CAPABILITIES, AGENT_SHARE_CONFIG, AGENT_SHARE_CONVERT_TO_CLOUD, AGENT_SHARE_CREATE,
-    AGENT_SHARE_DELETE, AGENT_SHARE_DELETE_CLOUD_COPY, AGENT_SHARE_DIAGNOSTICS,
+    AGENT_CAPABILITIES, AGENT_SHARE_APPEAL, AGENT_SHARE_CONFIG, AGENT_SHARE_CONVERT_TO_CLOUD,
+    AGENT_SHARE_CREATE, AGENT_SHARE_DELETE, AGENT_SHARE_DELETE_CLOUD_COPY, AGENT_SHARE_DIAGNOSTICS,
     AGENT_SHARE_DISMISS_PENDING, AGENT_SHARE_LIST, AGENT_SHARE_LOGS, AGENT_SHARE_RECEIVE,
-    AGENT_SHARE_RECEIVE_RECORDS, AGENT_SHARE_RESOLVE, AGENT_SHARE_RESUME, AGENT_SHARE_SESSION_KILL,
-    AGENT_SHARE_SET_LOCAL_CONFIG, AGENT_SHARE_STOP, AGENT_SHARE_STOP_PROVIDING,
-    AGENT_SHARE_SWITCH_TO_BRIDGE, AGENT_SHARE_UPDATE, ALL_METHODS, CAPABILITY_AGENT_SHARE,
+    AGENT_SHARE_RECEIVE_RECORDS, AGENT_SHARE_REPORT, AGENT_SHARE_RESOLVE, AGENT_SHARE_RESUME,
+    AGENT_SHARE_SESSION_KILL, AGENT_SHARE_SET_LOCAL_CONFIG, AGENT_SHARE_STOP,
+    AGENT_SHARE_STOP_PROVIDING, AGENT_SHARE_SWITCH_TO_BRIDGE, AGENT_SHARE_UPDATE,
+    AGENT_SHARE_USAGE_REFRESH, ALL_METHODS, CAPABILITY_AGENT_SHARE,
 };
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, ErrorReason, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, ServiceEvent,
@@ -20,6 +21,11 @@ use fluxdown_protocol::{
     ShareResolveDto, ShareSessionBytesDto, ShareSessionDetailDto, ShareSessionRole,
     ShareSourcesDto, ShareStateDto, ShareStatus, ShareTaskFactsDto, ShareUploadDto,
     ShareUploadStatus, apply_agent_event,
+};
+use fluxdown_protocol::{
+    CloudPlan, CloudProductKind, DISPLAY_BYTES_CAP, ShareAppealParams, ShareAppealStatus,
+    ShareGrantSource, ShareReportParams, ShareReportReason, ShareSwarmBlock, ShareTrafficKind,
+    ShareUsageDto,
 };
 use serde_json::{Value, json};
 
@@ -45,6 +51,9 @@ fn every_share_method_is_canonical_unique_and_literal() {
         (AGENT_SHARE_CONVERT_TO_CLOUD, "agent.share.convertToCloud"),
         (AGENT_SHARE_DELETE_CLOUD_COPY, "agent.share.deleteCloudCopy"),
         (AGENT_SHARE_STOP_PROVIDING, "agent.share.stopProviding"),
+        (AGENT_SHARE_USAGE_REFRESH, "agent.share.usageRefresh"),
+        (AGENT_SHARE_REPORT, "agent.share.report"),
+        (AGENT_SHARE_APPEAL, "agent.share.appeal"),
     ];
     for (constant, literal) in expected {
         assert_eq!(constant, literal);
@@ -67,8 +76,108 @@ fn every_share_method_is_canonical_unique_and_literal() {
 
 #[test]
 fn protocol_version_covers_the_share_events() {
-    assert_eq!(PROTOCOL_VERSION, 21);
+    assert_eq!(PROTOCOL_VERSION, 25);
     assert_eq!(MIN_PROTOCOL_VERSION, 19);
+}
+
+#[test]
+fn compliance_wire_round_trips_and_defaults() -> Result<(), serde_json::Error> {
+    assert_eq!(
+        serde_json::to_value(ShareStatus::Takedown)?,
+        json!("takedown")
+    );
+    let legacy: ShareDto = serde_json::from_value(json!({
+        "id": "s", "slug": "x", "url": "u", "pickupCode": "1", "title": "t",
+        "files": [], "totalBytes": 0, "tierId": "24h", "expiresAt": "e"
+    }))?;
+    assert_eq!(legacy.takedown_reason, None);
+    assert_eq!(legacy.appeal, None);
+    let wire = serde_json::to_value(&legacy)?;
+    assert!(wire.get("takedownReason").is_none() && wire.get("appeal").is_none());
+    let down: ShareDto = serde_json::from_value(json!({
+        "id": "s", "slug": "x", "url": "u", "pickupCode": "1", "title": "t",
+        "files": [], "totalBytes": 0, "tierId": "24h", "expiresAt": "e",
+        "status": "takedown", "takedownReason": "侵权",
+        "appeal": { "status": "escalated", "createdAt": "c" }
+    }))?;
+    assert_eq!(down.status, ShareStatus::Takedown);
+    assert_eq!(
+        down.appeal.map(|a| a.status),
+        Some(ShareAppealStatus::Unknown)
+    );
+
+    let canon: Vec<&str> = ShareReportReason::ALL
+        .iter()
+        .map(|r| r.canonical())
+        .collect();
+    assert_eq!(canon, ["侵权", "色情低俗", "违法违规", "恶意软件", "其他"]);
+    let report = ShareReportParams {
+        share_id: "s".to_owned(),
+        reason: ShareReportReason::Porn,
+        detail: None,
+        contact: Some("me".to_owned()),
+    };
+    assert_eq!(
+        serde_json::to_value(&report)?,
+        json!({ "shareId": "s", "reason": "porn", "contact": "me" })
+    );
+    let appeal: ShareAppealParams =
+        serde_json::from_value(json!({ "shareId": "s", "statement": "mine" }))?;
+    assert_eq!(appeal.statement, "mine");
+    Ok(())
+}
+
+#[test]
+fn usage_dto_tolerates_unknown_kinds_and_sources() -> Result<(), serde_json::Error> {
+    let usage: ShareUsageDto = serde_json::from_value(json!({
+        "month": "2026-10",
+        "resetAt": "2026-10-31T16:00:00Z",
+        "enforced": { "swarm": true },
+        "kinds": [
+            { "kind": "swarm", "monthlyAllowance": 5, "usedThisMonth": 1, "remaining": 4 },
+            { "kind": "quantum", "unlimited": true }
+        ],
+        "grants": [
+            { "source": "pack", "kind": "download", "bytes": DISPLAY_BYTES_CAP, "usedBytes": 1,
+              "expiresAt": "2027-01-01T00:00:00Z" },
+            { "source": "lottery", "kind": "upload", "bytes": 3 }
+        ],
+        "contribution": { "level": 2, "levelMax": 10, "nextLevelBytes": null,
+                          "earn": [{ "kind": "swarm", "permille": 1000 }], "future": 1 }
+    }))?;
+    assert!(usage.enforced.swarm && !usage.enforced.traffic);
+    assert_eq!(usage.kinds[0].kind, ShareTrafficKind::Swarm);
+    assert_eq!(usage.kinds[0].remaining, 4);
+    assert_eq!(usage.kinds[1].kind, ShareTrafficKind::Unknown);
+    assert!(usage.kinds[1].unlimited);
+    assert_eq!(usage.grants[0].source, ShareGrantSource::Pack);
+    assert_eq!(usage.grants[0].bytes, DISPLAY_BYTES_CAP);
+    assert_eq!(usage.grants[1].source, ShareGrantSource::Unknown);
+    assert_eq!(usage.grants[1].expires_at, None);
+    assert_eq!(usage.contribution.level, 2);
+    assert_eq!(usage.contribution.next_level_bytes, None);
+    assert_eq!(usage.contribution.earn[0].kind, ShareTrafficKind::Swarm);
+
+    let state: ShareStateDto = serde_json::from_value(json!({}))?;
+    assert_eq!(state.usage, None);
+    assert_eq!(state.usage_error, None);
+
+    let legacy: CloudPlan = serde_json::from_value(json!({ "code": "pro" }))?;
+    assert_eq!(legacy.product_kind, CloudProductKind::Membership);
+    assert_eq!(legacy.pack, None);
+    let pack: CloudPlan = serde_json::from_value(json!({
+        "code": "p10", "productKind": "pack",
+        "pack": { "kind": "swarm", "bytes": 10, "validDays": 90 }
+    }))?;
+    assert_eq!(pack.product_kind, CloudProductKind::Pack);
+    assert_eq!(
+        pack.pack.map(|p| (p.kind, p.bytes, p.valid_days)),
+        Some((ShareTrafficKind::Swarm, 10, 90))
+    );
+    let future: CloudPlan =
+        serde_json::from_value(json!({ "code": "x", "productKind": "bundle" }))?;
+    assert_eq!(future.product_kind, CloudProductKind::Unknown);
+    Ok(())
 }
 
 #[test]
@@ -98,6 +207,16 @@ fn share_error_reason_literals_are_exact() -> Result<(), serde_json::Error> {
         (ErrorReason::ShareOwnShare, "shareOwnShare"),
         (ErrorReason::ShareSourceMissing, "shareSourceMissing"),
         (ErrorReason::ShareSwarmLocked, "shareSwarmLocked"),
+        (
+            ErrorReason::ShareSwarmQuotaExhausted,
+            "shareSwarmQuotaExhausted",
+        ),
+        (
+            ErrorReason::ShareSwarmLoginRequired,
+            "shareSwarmLoginRequired",
+        ),
+        (ErrorReason::ShareStrikeLimited, "shareStrikeLimited"),
+        (ErrorReason::ShareAppealExists, "shareAppealExists"),
     ];
     for (reason, literal) in cases {
         assert_eq!(serde_json::to_value(reason)?, json!(literal));
@@ -106,6 +225,32 @@ fn share_error_reason_literals_are_exact() -> Result<(), serde_json::Error> {
             reason
         );
     }
+    Ok(())
+}
+
+#[test]
+fn swarm_admission_fields_default_for_older_payloads() -> Result<(), serde_json::Error> {
+    let facts: ShareTaskFactsDto = serde_json::from_value(json!({ "isShareReceive": true }))?;
+    assert_eq!(facts.swarm_block, None);
+    assert!(serde_json::to_value(&facts)?.get("swarmBlock").is_none());
+    let blocked: ShareTaskFactsDto =
+        serde_json::from_value(json!({ "swarmBlock": "quotaExhausted" }))?;
+    assert_eq!(blocked.swarm_block, Some(ShareSwarmBlock::QuotaExhausted));
+    let future: ShareTaskFactsDto = serde_json::from_value(json!({ "swarmBlock": "banned" }))?;
+    assert_eq!(future.swarm_block, Some(ShareSwarmBlock::Unknown));
+
+    let local: ShareLocalConfigDto = serde_json::from_value(json!({}))?;
+    assert_eq!(local.provide_daily_cap_bytes, None);
+    assert_eq!(local.provide_day_offset_secs, None);
+    let local: ShareLocalConfigDto = serde_json::from_value(
+        json!({ "provideDailyCapBytes": 0, "provideDayOffsetSecs": 28800 }),
+    )?;
+    assert_eq!(local.provide_daily_cap_bytes, Some(0));
+    assert_eq!(local.provide_day_offset_secs, Some(28800));
+
+    let policy: SharePolicySummaryDto = serde_json::from_value(json!({ "enabled": true }))?;
+    assert_eq!(policy.swarm_priority_reserved_slots, 0);
+    assert_eq!(policy.provide_daily_cap_default_bytes, 0);
     Ok(())
 }
 

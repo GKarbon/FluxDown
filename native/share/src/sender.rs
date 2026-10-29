@@ -282,6 +282,19 @@ impl ShareSender {
         self.inner.swarm.handler()
     }
 
+    pub(crate) fn set_swarm_policy(&self, priority_reserved: usize, daily_cap: u64, offset: i64) {
+        self.inner.swarm.set_priority_reserved(priority_reserved);
+        self.inner.swarm.set_daily_cap(daily_cap, offset);
+    }
+
+    pub(crate) fn swarm_daily_usage(&self) -> (i64, u64) {
+        self.inner.swarm.daily_usage()
+    }
+
+    pub(crate) fn restore_swarm_daily(&self, day: i64, used: u64) {
+        self.inner.swarm.restore_daily(day, used);
+    }
+
     pub(crate) fn handler(&self) -> ShareHandler {
         ShareHandler {
             sender: self.clone(),

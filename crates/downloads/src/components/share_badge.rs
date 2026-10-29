@@ -1,7 +1,7 @@
 //! 任务表状态列的FluxMesh来源角标：FluxMesh接收任务显示当前承载数据的路径（直连局域网 / 直连公网 /
 //! 中继 / 连接中），走中继时附「切换桥接」入口。角标与状态文案同字号档，单行省略，不改变行高。
 
-use fluxdown_protocol::{SharePathKind, ShareTaskFactsDto};
+use fluxdown_protocol::{SharePathKind, ShareSwarmBlock, ShareTaskFactsDto};
 use fluxdown_ui_components::{FluxIcon, tooltip_view};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -36,6 +36,8 @@ pub(crate) struct ShareBadge {
     pub(crate) tone: ShareTone,
     /// 「切换桥接」入口：进行中的任务只要来源还不是桥接就提供。
     pub(crate) switch_bridge: Option<SwitchBridge>,
+    /// 共享加速被云端拒绝的原因；只追加弱化 chip，不改变主状态。
+    pub(crate) swarm_block: Option<ShareSwarmBlock>,
 }
 
 /// 任务事实 → 角标；不是FluxMesh接收任务时没有角标。`active` = 任务仍在进行（等待 / 下载中 / 暂停）：
@@ -63,6 +65,9 @@ pub(crate) fn badge_for(facts: &ShareTaskFactsDto, active: bool) -> Option<Share
         peers: facts.swarm_peers,
         tone,
         switch_bridge,
+        swarm_block: facts
+            .swarm_block
+            .filter(|block| *block != ShareSwarmBlock::Unknown),
     })
 }
 
@@ -81,6 +86,7 @@ pub(crate) fn share_badge(
     badge: ShareBadge,
     strings: &DownloadStrings,
     switch_available: bool,
+    open_usage_available: bool,
     host: Option<&WeakEntity<DownloadView>>,
     cx: &App,
 ) -> AnyElement {
@@ -151,12 +157,47 @@ pub(crate) fn share_badge(
                 .child(action)
         });
 
+    let chip = badge.swarm_block.map(|block| {
+        let label = match block {
+            ShareSwarmBlock::QuotaExhausted => strings.share_swarm_quota_chip.clone(),
+            _ => strings.share_swarm_login_chip.clone(),
+        };
+        let color = tokens.colors.muted_foreground;
+        let mut chip = div()
+            .id(SharedString::from(format!("share-swarm-chip-{task_id}")))
+            .min_w_0()
+            .truncate()
+            .px(tokens.spacing.xs)
+            .rounded(tokens.radius.sm)
+            .text_size(text.size)
+            .line_height(text.line_height)
+            .text_color(color);
+        if let Some(host) = host.filter(|_| open_usage_available) {
+            let host = host.clone();
+            let task_id = task_id.to_owned();
+            chip = chip
+                .cursor_pointer()
+                .hover(move |style| style.bg(color.opacity(0.14)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let task_id = task_id.clone();
+                    let Ok(()) = host.update(cx, |view, cx| {
+                        view.share_open_usage(task_id, window, cx);
+                    }) else {
+                        return;
+                    };
+                });
+        }
+        chip.child(label)
+    });
     h_flex()
         .min_w_0()
         .items_center()
         .gap(tokens.spacing.xxs)
         .child(pill)
         .children(switch)
+        .children(chip)
         .into_any_element()
 }
 
@@ -252,5 +293,24 @@ mod tests {
         let badge = badge_for(&facts(SharePathKind::Relay, true, true), false);
         assert_eq!(badge.map(|badge| badge.switch_bridge), Some(None));
         assert_eq!(badge.map(|badge| badge.kind), Some(SharePathKind::Relay));
+    }
+
+    #[test]
+    fn swarm_block_is_carried_and_unknown_is_dropped() {
+        let with = |block| {
+            badge_for(
+                &ShareTaskFactsDto {
+                    swarm_block: Some(block),
+                    ..facts(SharePathKind::DirectWan, false, true)
+                },
+                true,
+            )
+            .and_then(|badge| badge.swarm_block)
+        };
+        assert_eq!(
+            with(ShareSwarmBlock::QuotaExhausted),
+            Some(ShareSwarmBlock::QuotaExhausted)
+        );
+        assert_eq!(with(ShareSwarmBlock::Unknown), None);
     }
 }

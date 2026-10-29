@@ -71,6 +71,9 @@ impl ShareService {
         params: Option<Value>,
     ) -> Result<Value, RpcErrorData> {
         match method_name {
+            method::AGENT_SHARE_USAGE_REFRESH => to_value(&self.usage_for_rpc().await?),
+            method::AGENT_SHARE_REPORT => to_value(&self.report(parse(params)?).await?),
+            method::AGENT_SHARE_APPEAL => to_value(&self.appeal(parse(params)?).await?),
             method::AGENT_SHARE_CONFIG => {
                 let cfg = self.config(true).await?;
                 let local = self.with(|i| i.local.clone());
@@ -225,6 +228,7 @@ impl ShareService {
                 i.endpoint_dirty = true;
             }
         });
+        self.apply_swarm_policy();
         // 关闭「接收的文件参与共享」：立即停止全部共享。
         if old.auto_provide.unwrap_or(true) && !next.auto_provide.unwrap_or(true) {
             self.stop_all_provides().await;
@@ -528,6 +532,13 @@ impl ShareService {
     /// `sourceMissing` 并以 `ShareSourceMissing` 拒绝。
     async fn resume(&self, id: &str) -> Result<ShareDto, RpcErrorData> {
         let stored = self.find_share(id)?;
+        if stored.dto.status == ShareStatus::Takedown {
+            return Err(reason(
+                ApplicationErrorCode::Conflict,
+                false,
+                ErrorReason::ShareStopped,
+            ));
+        }
         if stored.dto.status == ShareStatus::Active {
             return Ok(stored.dto);
         }
@@ -845,15 +856,7 @@ impl ShareService {
                 Some((token, urls))
             })
             .ok_or_else(unavailable)?;
-        if let Lookup::Refresh(delay) = first_lookup {
-            self.spawn_swarm_lookup(
-                token.clone(),
-                dto.share_id.clone(),
-                resp.ticket.clone(),
-                indexes.clone(),
-                delay,
-            );
-        }
+        self.continue_lookup(first_lookup, &token, &dto.share_id, &resp.ticket, &indexes);
         let record_id = uuid::Uuid::new_v4().to_string();
         let save_dir = params.save_dir.clone().unwrap_or_default();
         let mut task_ids = Vec::with_capacity(indexes.len());
