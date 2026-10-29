@@ -13,6 +13,7 @@ mod host;
 mod hub;
 mod manage_ui;
 pub mod model;
+mod nested_scroll;
 mod network;
 mod page;
 mod panel;
