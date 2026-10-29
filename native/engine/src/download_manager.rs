@@ -498,7 +498,10 @@ const AUTO_START_PROXY_RATIO: f64 = 1.5;
 /// - 直连近期走不通：在可用代理里按先验择优（无先验视为 0，同分取候选顺序
 ///   靠前者）——不再每个任务都先撞一次被墙的直连；
 /// - 全部路径都走不通：失败记录不可区分优劣，回到无阻断时的先验规则。
-fn pick_auto_takeoff(paths: &[crate::auto_proxy::PathCandidate], blocked: &[bool]) -> usize {
+pub(crate) fn pick_auto_takeoff(
+    paths: &[crate::auto_proxy::PathCandidate],
+    blocked: &[bool],
+) -> usize {
     let is_blocked = |i: usize| blocked.get(i).copied().unwrap_or(false);
     let all_blocked = (0..paths.len()).all(is_blocked);
     let usable = |i: usize| all_blocked || !is_blocked(i);
@@ -533,6 +536,53 @@ enum AutoFailoverTarget {
     Direct,
 }
 
+impl AutoFailoverTarget {
+    #[cfg(feature = "plugins")]
+    fn route(self) -> crate::auto_proxy::RoutePath {
+        match self {
+            Self::Proxy(source) => crate::auto_proxy::RoutePath::Proxy(source),
+            Self::Direct => crate::auto_proxy::RoutePath::Direct,
+        }
+    }
+
+    /// Auto 计划路径 → 目标（网卡链路不进 Auto 候选，按直连归类）。
+    #[cfg(feature = "plugins")]
+    fn from_route(route: crate::auto_proxy::RoutePath) -> Self {
+        match route {
+            crate::auto_proxy::RoutePath::Proxy(source) => Self::Proxy(source),
+            crate::auto_proxy::RoutePath::Direct | crate::auto_proxy::RoutePath::Link(_) => {
+                Self::Direct
+            }
+        }
+    }
+
+    /// 作为一次性备用链路起跑时的路由标签。
+    fn failover_label(self) -> &'static str {
+        use crate::auto_proxy::route;
+        match self {
+            Self::Proxy(source) => route::with_source(route::PROXY_FAILOVER, source),
+            Self::Direct => route::DIRECT_FAILOVER,
+        }
+    }
+}
+
+/// 起跑时强制的单一路径：一次性备用链路，或插件解析钉定的出口（媒体直链常绑定解析时的
+/// 出口 IP，下载必须走同一出口、不做多路径）。`label` 是起飞路由标签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForcedRoute {
+    target: AutoFailoverTarget,
+    label: &'static str,
+}
+
+impl ForcedRoute {
+    fn failover(target: AutoFailoverTarget) -> Self {
+        Self {
+            target,
+            label: target.failover_label(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct AutoFailoverAttempts {
     direct: bool,
@@ -553,6 +603,31 @@ impl AutoFailoverAttempts {
             crate::auto_proxy::CandidateSource::ManualFields => self.manual,
             crate::auto_proxy::CandidateSource::System => self.system,
         }
+    }
+
+    /// 插件解析在本周期内断过的路径同样计入（不再作为下载备用链路的目标）。
+    #[cfg(feature = "plugins")]
+    fn mark_route(&mut self, route: crate::auto_proxy::RoutePath) {
+        match route {
+            crate::auto_proxy::RoutePath::Proxy(source) => self.mark_source(source),
+            crate::auto_proxy::RoutePath::Direct | crate::auto_proxy::RoutePath::Link(_) => {
+                self.direct = true;
+            }
+        }
+    }
+
+    /// 本周期已尝试的路径（插件解析计划不再把它们排为换路目标）。
+    #[cfg(feature = "plugins")]
+    fn tried_routes(&self) -> Vec<crate::auto_proxy::RoutePath> {
+        use crate::auto_proxy::{CandidateSource, RoutePath};
+        [
+            (self.direct, RoutePath::Direct),
+            (self.manual, RoutePath::Proxy(CandidateSource::ManualFields)),
+            (self.system, RoutePath::Proxy(CandidateSource::System)),
+        ]
+        .into_iter()
+        .filter_map(|(tried, route)| tried.then_some(route))
+        .collect()
     }
 }
 
@@ -2293,6 +2368,8 @@ async fn run_http_family_task(run: HttpFamilyRun) {
     let panic_db = params.db.clone();
     let panic_progress_tx = params.progress_tx.clone();
     let mut params = params;
+    // 拦截阶段的插件请求跟随任务出口（Prepare 用起跑出口；改道 / PAC 后再同步一次）。
+    crate::intercept::sync_egress(&params);
     if !use_ed2k
         && let Err(message) = prepare_request(&mut params, prelude.is_some(), resolver_patch).await
     {
@@ -2314,6 +2391,7 @@ async fn run_http_family_task(run: HttpFamilyRun) {
             used = crate::pac_route::apply(&mut params, pac_routing) => used,
         }
     };
+    crate::intercept::sync_egress(&params);
     if let Some(ctx) = prelude.as_mut() {
         ctx.support = ask_support(
             &params.url,
@@ -3406,6 +3484,20 @@ pub struct ResolveOutcome {
     pub result: Result<Option<crate::plugin::ResolveResult>, crate::plugin::PluginError>,
     /// 用户关闭变体 / 插件选择框 → 以该原因取消任务（而非回退默认项）。
     pub cancelled: Option<crate::plugin::CancelReason>,
+    /// 解析的源链接（出口计划的匹配对象）。
+    pub subject_url: String,
+    /// 出口计划执行结果：换过路的路径与产出结果的一步。
+    pub egress: crate::plugin::call_egress::EgressOutcome,
+}
+
+/// 解析成功后交给起跑的出口（见 `DownloadManager::resolved_egress`）。
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone)]
+struct ResolvedEgress {
+    /// 下载按它匹配站点规则 / 做 Auto 决策（解析产物再由 `rule_route::apply` 重匹配）。
+    subject_url: String,
+    /// Auto 计划下解析所用的路径：下载只走这一条。
+    pin: Option<ForcedRoute>,
 }
 
 /// resolve 等待中的任务状态。Start 携 `QueuedTask`（再入覆盖 res 后分派）；
@@ -3864,6 +3956,10 @@ pub struct DownloadManager {
     /// resume 侧再入的解析结果（on_resolve_ready → do_resume_task 传递，避免改签名）。
     #[cfg(feature = "plugins")]
     resume_applied: HashMap<String, crate::plugin::ResolveResult>,
+    /// 插件解析刚成功的任务的出口（on_resolve_ready 写入、紧随其后的起跑消费）：下载以
+    /// 源链接定出口，Auto 下钉定解析所用的那条路径。每次解析回流覆盖，绝不跨运行保留。
+    #[cfg(feature = "plugins")]
+    resolved_egress: HashMap<String, ResolvedEgress>,
 }
 
 /// Configuration parameters for [`DownloadManager::new`].
@@ -4024,6 +4120,8 @@ impl DownloadManager {
             pending_resolve: HashMap::new(),
             #[cfg(feature = "plugins")]
             resume_applied: HashMap::new(),
+            #[cfg(feature = "plugins")]
+            resolved_egress: HashMap::new(),
         })
     }
 
@@ -4063,6 +4161,7 @@ impl DownloadManager {
         pm: Arc<crate::plugin::PluginManager>,
         bridge: Arc<crate::plugin::bridge::EngineBridge>,
     ) {
+        pm.attach_egress_source(Arc::clone(&bridge));
         self.plugin_manager = Some(pm);
         self.plugin_bridge = Some(bridge);
     }
@@ -4341,6 +4440,7 @@ impl DownloadManager {
         task_id: String,
         identity: String,
         req: crate::plugin::ResolveRequest,
+        plan: crate::plugin::call_egress::EgressPlan,
         kind: ResolveKind,
         generation: u64,
         unattended: bool,
@@ -4355,6 +4455,7 @@ impl DownloadManager {
         let handle = pm.runtime_handle();
         let selector = self.selector.clone();
         let second_stage = !req.resolver_item.is_empty();
+        let subject_url = req.url.clone();
         handle.spawn(async move {
             let mut identity = identity;
             // 多插件冲突待选：首次 resolve 前定案（站点默认 / 无人值守回退 / 询问用户），
@@ -4389,6 +4490,8 @@ impl DownloadManager {
                                 generation,
                                 result: Ok(None),
                                 cancelled: Some(crate::plugin::CancelReason::UserCancelled),
+                                subject_url,
+                                egress: crate::plugin::call_egress::EgressOutcome::default(),
                             })
                             .is_err()
                         {
@@ -4405,6 +4508,8 @@ impl DownloadManager {
                                 generation,
                                 result: Err(error),
                                 cancelled: None,
+                                subject_url,
+                                egress: crate::plugin::call_egress::EgressOutcome::default(),
                             })
                             .is_err()
                         {
@@ -4414,14 +4519,16 @@ impl DownloadManager {
                     }
                 }
             }
-            let fut = std::panic::AssertUnwindSafe(pm.resolve(&identity, req));
+            // 同一占位 / 世代 / 取消令牌下按出口计划逐步解析：Auto 断在网络层时换路重跑，
+            // 窗口内暂停 / 取消 / 删除照常丢弃整个 future。选择框只在成功后出现，重跑不重复询问。
+            let fut = std::panic::AssertUnwindSafe(pm.resolve_planned(&identity, req, Some(plan)));
             // 暂停/取消/删除会 cancel 占位 token：立即丢弃 resolve future（释放
             // resolve/yt-dlp 信号量槽位），且不回流——占位已由触发方清理。
             let resolved = tokio::select! {
                 r = fut.catch_unwind() => r,
                 _ = cancel.cancelled() => return,
             };
-            let mut result = match resolved {
+            let (mut result, egress) = match resolved {
                 Ok(r) => r,
                 Err(panic) => {
                     let msg = panic
@@ -4429,7 +4536,10 @@ impl DownloadManager {
                         .map(|s| s.to_string())
                         .or_else(|| panic.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "resolver panicked".to_string());
-                    Err(crate::plugin::PluginError::Runtime(msg))
+                    (
+                        Err(crate::plugin::PluginError::Runtime(msg)),
+                        crate::plugin::call_egress::EgressOutcome::default(),
+                    )
                 }
             };
             // 多变体收敛：在 off-actor worker 内 await 用户选择（不阻塞 actor），
@@ -4465,6 +4575,8 @@ impl DownloadManager {
                     generation,
                     result,
                     cancelled,
+                    subject_url,
+                    egress,
                 })
                 .is_err()
             {
@@ -4480,6 +4592,85 @@ impl DownloadManager {
     pub async fn on_resolve_ready(&mut self, out: ResolveOutcome) {
         self.handle_resolve_ready(out).await;
         self.reconcile_priority().await;
+    }
+
+    /// 任务解析的出口计划（actor 上调用；System / Auto 系统候选检测同 `auto_route_decision`
+    /// 在 actor 上进行）。已排程的一次性备用链路作为首步，本周期断过的路径不再排为换路目标。
+    /// 新一轮解析开始即作废上一轮交给起跑的出口（清单裂变后的二段解析等）。
+    #[cfg(feature = "plugins")]
+    fn resolve_egress_plan(
+        &mut self,
+        task_id: &str,
+        source_url: &str,
+        proxy_url: &str,
+    ) -> crate::plugin::call_egress::EgressPlan {
+        self.resolved_egress.remove(task_id);
+        let forced = self
+            .auto_failover_pending
+            .get(task_id)
+            .map(|target| target.route());
+        let tried = self
+            .auto_failover_attempts
+            .get(task_id)
+            .map(AutoFailoverAttempts::tried_routes)
+            .unwrap_or_default();
+        crate::plugin::call_egress::plan_call(
+            &self.proxy_config,
+            source_url,
+            crate::plugin::call_egress::PlanTask {
+                proxy_url,
+                forced,
+                tried: &tried,
+            },
+        )
+    }
+
+    /// 解析回流（已过世代守卫）：断在网络层的路径计入本周期备用链路尝试；成功时记下
+    /// 交给起跑的出口，失败 / 取消时清掉——每次解析回流覆盖，绝不沿用上一次。
+    #[cfg(feature = "plugins")]
+    fn absorb_resolve_egress(&mut self, task_id: &str, out: &ResolveOutcome) {
+        if !out.egress.failed.is_empty() {
+            let attempts = self
+                .auto_failover_attempts
+                .entry(task_id.to_string())
+                .or_default();
+            for route in &out.egress.failed {
+                attempts.mark_route(*route);
+            }
+        }
+        // 清单裂变不直接起跑（成员 / 改写后的任务各自再解析）：不留出口。
+        let fission = matches!(&out.result, Ok(Some(res)) if res.manifest.is_some());
+        if out.result.is_err() || out.cancelled.is_some() || fission {
+            self.resolved_egress.remove(task_id);
+            return;
+        }
+        let pin = out.egress.used.as_ref().and_then(|step| {
+            step.route.map(|route| ForcedRoute {
+                target: AutoFailoverTarget::from_route(route),
+                label: step.label,
+            })
+        });
+        self.resolved_egress.insert(
+            task_id.to_string(),
+            ResolvedEgress {
+                subject_url: out.subject_url.clone(),
+                pin,
+            },
+        );
+    }
+
+    /// 起跑出口输入（一次性消费）：插件解析过的任务以源链接定出口并钉定解析所用路径；
+    /// 否则用已排程的一次性备用链路。返回（替代任务链接的出口匹配链接, 强制路径）。
+    fn take_start_route(&mut self, task_id: &str) -> (Option<String>, Option<ForcedRoute>) {
+        let pending = self
+            .auto_failover_pending
+            .remove(task_id)
+            .map(ForcedRoute::failover);
+        #[cfg(feature = "plugins")]
+        if let Some(resolved) = self.resolved_egress.remove(task_id) {
+            return (Some(resolved.subject_url), resolved.pin.or(pending));
+        }
+        (None, pending)
     }
 
     /// 先复查 DB 生命周期，再按结果分派。
@@ -4510,6 +4701,7 @@ impl DownloadManager {
             }
             return;
         }
+        self.absorb_resolve_egress(&task_id, &out);
         // 用户在变体 / 插件选择弹窗点关闭/取消 → 任务暂停（与「文件已存在」取消、BT 文件
         // 选择取消同一语义）：请求上下文都在库里，恢复时 begin_resolve_resume 重新解析并
         // 再次询问。放在世代守卫之后：确认本 outcome 拥有当前 pending 条目才动手。
@@ -5119,6 +5311,7 @@ impl DownloadManager {
             extra_headers: queued.extra_headers.clone(),
             resolver_item: queued.resolver_item.clone(),
         };
+        let plan = self.resolve_egress_plan(&task_id, &req.url, &queued.proxy_url);
         self.pending_resolve.insert(
             task_id.clone(),
             PendingResolve::Start {
@@ -5135,6 +5328,7 @@ impl DownloadManager {
             task_id,
             identity,
             req,
+            plan,
             ResolveKind::Start,
             spawn_gen,
             unattended,
@@ -5367,6 +5561,7 @@ impl DownloadManager {
             extra_headers,
             resolver_item,
         };
+        let plan = self.resolve_egress_plan(task_id, &req.url, &task.proxy_url);
         self.pending_resolve.insert(
             task_id.to_string(),
             PendingResolve::Resume {
@@ -5381,6 +5576,7 @@ impl DownloadManager {
             task_id.to_string(),
             identity,
             req,
+            plan,
             ResolveKind::Resume,
             spawn_gen,
             unattended,
@@ -9412,14 +9608,14 @@ impl DownloadManager {
     /// 其余路径作为备选——探测阶段由 [`crate::auto_probe`] 错峰竞速，多段
     /// 下载中由 coordinator 同窗实测调度。局部续传同样适用——每个分段请求
     /// 都经 validator 校验，路径不一致在写盘前被拒绝。`forced_route` 来自
-    /// 一次性备用链路：它独立于通用自动重试配额、优先于先验，且只走单一路径
-    /// （仍带无备选的上下文，使该路径的实测速率回写跨任务先验）。
+    /// 一次性备用链路或插件解析钉定的出口：它独立于通用自动重试配额、优先于先验，
+    /// 且只走单一路径（仍带无备选的上下文，使该路径的实测速率回写跨任务先验）。
     fn auto_route_decision(
         &self,
         url: &str,
         user_agent: &str,
         ignore_tls_errors: bool,
-        forced_route: Option<AutoFailoverTarget>,
+        forced_route: Option<ForcedRoute>,
     ) -> Option<(
         ProxyConfig,
         &'static str,
@@ -9443,23 +9639,30 @@ impl DownloadManager {
                 })
             })
         };
-        if forced_route == Some(AutoFailoverTarget::Direct) {
+        if let Some(ForcedRoute {
+            target: AutoFailoverTarget::Direct,
+            label,
+        }) = forced_route
+        {
             return Some((
                 ProxyConfig::default(),
-                route::DIRECT_FAILOVER,
-                single_path(RoutePath::Direct, route::DIRECT_FAILOVER),
+                label,
+                single_path(RoutePath::Direct, label),
             ));
         }
         let candidates = auto_proxy::resolve_candidates(&self.proxy_config);
         if candidates.is_empty() {
             return Some((ProxyConfig::default(), route::DIRECT, None));
         }
-        if let Some(AutoFailoverTarget::Proxy(source)) = forced_route {
+        if let Some(ForcedRoute {
+            target: AutoFailoverTarget::Proxy(source),
+            label,
+        }) = forced_route
+        {
             if let Some(candidate) = candidates
                 .iter()
                 .find(|candidate| candidate.source == source)
             {
-                let label = route::with_source(route::PROXY_FAILOVER, source);
                 return Some((
                     candidate.config.clone(),
                     label,
@@ -9551,8 +9754,10 @@ impl DownloadManager {
     /// 为当前任务解析代理/UA/TLS 策略并构建一致的 HTTP 上下文。
     ///
     /// 站点代理规则只对「跟随全局」（`proxy_url` 为空）的任务生效：链接命中规则时任务
-    /// 出口取该规则；未命中时取全局模式（含 Auto 决策）。`forced_route` 为已排程的
-    /// 一次性备用链路（仅任务启动路径消费），client 与标签同源于它。
+    /// 出口取该规则；未命中时取全局模式（含 Auto 决策）。插件解析过的任务传**源链接**
+    /// （页面 URL）：解析产物视同一次重定向，最终链接由 `rule_route::apply` 重匹配——命中
+    /// 他条规则才改道，未命中沿用源链接的出口，使解析与下载同出口。`forced_route` 为
+    /// 已排程的一次性备用链路或解析钉定的出口（仅任务启动路径消费），client 与标签同源于它。
     fn task_http_context(
         &self,
         url: &str,
@@ -9560,7 +9765,7 @@ impl DownloadManager {
         user_agent: &str,
         queue_id: &str,
         ignore_tls_errors: bool,
-        forced_route: Option<AutoFailoverTarget>,
+        forced_route: Option<ForcedRoute>,
     ) -> TaskEgress {
         let queue_ua = self
             .queues
@@ -9896,6 +10101,12 @@ impl DownloadManager {
         // 插件惰性解析守卫（体首）：命中 resolver 且未解析 → off-actor resolve 后再入。
         #[cfg(feature = "plugins")]
         let mut queued = queued;
+        // 解析交给起跑的出口只属于紧随其后的这次再入（已解析且仍绑定插件）；其余起跑一律作废，
+        // 防止插件被卸载 / 忽略插件重试后的直连起跑沿用旧钉定。
+        #[cfg(feature = "plugins")]
+        if !queued.resolved || queued.resolver_plugin_id.is_empty() {
+            self.resolved_egress.remove(&queued.task_id);
+        }
         #[cfg(feature = "plugins")]
         if !queued.resolved
             && (!queued.resolver_plugin_id.is_empty() || !queued.resolver_item.is_empty())
@@ -10077,6 +10288,9 @@ impl DownloadManager {
         let task_span = tracing::error_span!("download_task", task_id = %task_id);
 
         let handle = if use_bt {
+            // BT 不走 HTTP 出口决策：解析留下的出口一并作废。
+            #[cfg(feature = "plugins")]
+            self.resolved_egress.remove(&task_id);
             // Lazily initialise the shared BT session.
             if let Err(e) = self.ensure_bt_session().await {
                 crate::log_error!("[manager] failed to init BT session: {}", e);
@@ -10286,7 +10500,7 @@ impl DownloadManager {
                 return;
             }
         } else {
-            let forced_route = self.auto_failover_pending.remove(&task_id);
+            let (route_subject, forced_route) = self.take_start_route(&task_id);
             let TaskEgress {
                 client: task_client,
                 proxy: task_proxy,
@@ -10295,7 +10509,7 @@ impl DownloadManager {
                 router: egress_router,
                 pac: pac_routing,
             } = self.task_http_context(
-                &url,
+                route_subject.as_deref().unwrap_or(&url),
                 &proxy_url,
                 &user_agent,
                 &queue_id,
@@ -10341,14 +10555,19 @@ impl DownloadManager {
                 &task_proxy,
                 self.resolved_task_ua(&user_agent, &queue_id),
             );
-            let multi_nic = self.multi_nic_input(
-                ignore_tls_errors,
-                &task_proxy,
-                auto_ctx
-                    .as_ref()
-                    .is_some_and(|ctx| !ctx.alternates.is_empty()),
-                self.resolved_task_ua(&user_agent, &queue_id),
-            );
+            // 插件解析出的直链常绑定解析时的出口 IP：多网卡聚合会换公网 IP，不启用。
+            let multi_nic = if route_subject.is_some() {
+                None
+            } else {
+                self.multi_nic_input(
+                    ignore_tls_errors,
+                    &task_proxy,
+                    auto_ctx
+                        .as_ref()
+                        .is_some_and(|ctx| !ctx.alternates.is_empty()),
+                    self.resolved_task_ua(&user_agent, &queue_id),
+                )
+            };
             let task_unattended = self.db.is_task_unattended(&task_id).await.unwrap_or(false);
             let support = ask_support(
                 &url,
@@ -10442,6 +10661,7 @@ impl DownloadManager {
     fn clear_pending_resolve(&mut self, task_id: &str) {
         self.pending_resolve.remove(task_id);
         self.resume_applied.remove(task_id);
+        self.resolved_egress.remove(task_id);
     }
     #[cfg(not(feature = "plugins"))]
     fn clear_pending_resolve(&mut self, _task_id: &str) {}
@@ -11291,6 +11511,7 @@ impl DownloadManager {
                     }
                     return;
                 }
+                self.resolved_egress.remove(task_id);
                 None
             } else if let Some(res) = reentered {
                 resolver_identity = std::mem::take(&mut resolver);
@@ -11524,6 +11745,9 @@ impl DownloadManager {
         let task_span = tracing::error_span!("download_task", task_id = %tid);
 
         let handle = if use_bt {
+            // BT 不走 HTTP 出口决策：解析留下的出口一并作废。
+            #[cfg(feature = "plugins")]
+            self.resolved_egress.remove(task_id);
             // Lazily initialise the shared BT session.
             if let Err(e) = self.ensure_bt_session().await {
                 crate::log_error!("[manager] failed to init BT session for resume: {}", e);
@@ -11794,9 +12018,9 @@ impl DownloadManager {
                     .then(|| value.clone())
             });
             let persisted_ua = persisted_user_agent.unwrap_or_default();
-            // 与 start 路径共用 `task_http_context`：一次性备用链路（Auto）在此消费，
-            // 站点规则 / Auto 决策 / 专属 client 的取舍只有这一份实现。
-            let forced_route = self.auto_failover_pending.remove(&tid);
+            // 与 start 路径共用 `task_http_context`：一次性备用链路（Auto）与解析钉定的出口
+            // 在此消费，站点规则 / Auto 决策 / 专属 client 的取舍只有这一份实现。
+            let (route_subject, forced_route) = self.take_start_route(&tid);
             let TaskEgress {
                 client: task_client,
                 proxy: task_proxy,
@@ -11805,7 +12029,7 @@ impl DownloadManager {
                 router: egress_router,
                 pac: pac_routing,
             } = self.task_http_context(
-                &task.url,
+                route_subject.as_deref().unwrap_or(&task.url),
                 &task.proxy_url,
                 &persisted_ua,
                 &task.queue_id,
@@ -11879,14 +12103,19 @@ impl DownloadManager {
 
             // 多 CDN 聚合输入与主请求使用同一份恢复 UA。
             let cdn = self.cdn_task_input(task.ignore_tls_errors, &task_proxy, &resume_user_agent);
-            let multi_nic = self.multi_nic_input(
-                task.ignore_tls_errors,
-                &task_proxy,
-                auto_ctx
-                    .as_ref()
-                    .is_some_and(|ctx| !ctx.alternates.is_empty()),
-                &resume_user_agent,
-            );
+            // 插件解析出的直链常绑定解析时的出口 IP：多网卡聚合会换公网 IP，不启用。
+            let multi_nic = if route_subject.is_some() {
+                None
+            } else {
+                self.multi_nic_input(
+                    task.ignore_tls_errors,
+                    &task_proxy,
+                    auto_ctx
+                        .as_ref()
+                        .is_some_and(|ctx| !ctx.alternates.is_empty()),
+                    &resume_user_agent,
+                )
+            };
             let task_unattended = self.db.is_task_unattended(&tid).await.unwrap_or(false);
             // 从未有过任何落盘进度的任务（稍后下载 / 排队中暂停后恢复 / 重启自动
             // 恢复 / 重新下载 / 答复后重入）等同全新起跑：经启动序幕统一处理命名、
@@ -16100,9 +16329,9 @@ mod tests {
                 "https://example.com/release.bin",
                 "",
                 false,
-                Some(AutoFailoverTarget::Proxy(
+                Some(ForcedRoute::failover(AutoFailoverTarget::Proxy(
                     crate::auto_proxy::CandidateSource::ManualFields,
-                )),
+                ))),
             )
             .expect("auto mode should return a route decision");
         assert_eq!(selected_proxy.port, 7890);

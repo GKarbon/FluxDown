@@ -153,6 +153,7 @@ pub(super) async fn start(
             host.ytdlp_permitted,
             host.auth_permitted,
             host.private_network_allowed,
+            host.egress.clone(),
             interrupt_ns.clone(),
             wall_pause,
         )

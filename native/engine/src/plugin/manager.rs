@@ -21,6 +21,7 @@ use crate::subscription::{
     SubscriptionFetchFuture, SubscriptionFetchRequest, SubscriptionProvider,
 };
 
+use super::call_egress::{CallEgress, EgressOutcome, EgressPlan, PlanTask, plan_call, route_name};
 use super::manifest::{
     PERMISSION_AUTH, PERMISSION_FFMPEG, PERMISSION_YTDLP, PluginManifest, SettingField,
     SettingType, is_safe_relative_path, is_valid_identity,
@@ -342,6 +343,37 @@ pub struct PluginManager {
     /// 串行化 [`Self::publish_state`]：快照与发射在同一把锁内，事件顺序即状态顺序，
     /// 较旧的快照永远不会盖过较新的。
     publish_lock: tokio::sync::Mutex<()>,
+    /// 全局出口来源（引擎装配时注入）：非任务调用（预解析 / 订阅 / 登录 / 宿主加速改写）
+    /// 据此制定出口计划。未注入（单测里的 null bridge）时调用走 bridge 的全局出口、不换路。
+    egress_source: std::sync::RwLock<Option<Arc<super::bridge::EngineBridge>>>,
+}
+
+/// 一次 resolve 调用的参数（前置校验通过后；每个出口步复用）。
+struct PreparedResolve {
+    streak: Arc<AtomicU32>,
+    script: PluginScript,
+    settings_json: String,
+    budget: ExecutionBudget,
+    host: HostContext,
+    second_stage: bool,
+}
+
+/// 计划内所有路径都断在网络层：错误文案附上已尝试的出口，便于用户判断是网络问题。
+/// 只改写插件运行时错误的文案；`Timeout` 等变体保持原样（调用方按变体分支）。
+fn with_tried_routes(error: PluginError, failed: &[crate::auto_proxy::RoutePath]) -> PluginError {
+    match error {
+        PluginError::Runtime(message) if failed.len() > 1 => {
+            let tried: Vec<&str> = failed
+                .iter()
+                .map(|route| route_name(Some(*route)))
+                .collect();
+            PluginError::Runtime(format!(
+                "{message}（已依次尝试{}，均断在网络层）",
+                tried.join(" → ")
+            ))
+        }
+        other => other,
+    }
 }
 
 impl PluginManager {
@@ -386,6 +418,7 @@ impl PluginManager {
             site_prompts: routing::SitePromptLocks::default(),
             package_revisions: super::package_revision::PackageRevisions::new(),
             publish_lock: tokio::sync::Mutex::new(()),
+            egress_source: std::sync::RwLock::new(None),
         }
     }
 
@@ -768,7 +801,9 @@ impl PluginManager {
         })
     }
 
-    /// 惰性解析。off-actor worker 调用（在插件专用 runtime 上）。
+    /// 惰性解析（非任务调用：新建下载预解析、宿主自身下载的加速改写、测试）。off-actor
+    /// 调用（在插件专用 runtime 上）。出口按源链接与全局代理设定制定计划（见
+    /// [`super::call_egress`]），Auto 下断在网络层时换路重跑。
     ///
     /// **fail-closed**：任务带 resolver 绑定但插件已卸载/被禁用/当前版本无
     /// resolver 时返回 `Err`——绝不放行原始页面 URL（那会把网页 HTML 当媒体文件
@@ -777,8 +812,76 @@ impl PluginManager {
     pub async fn resolve(
         &self,
         identity: &str,
-        mut req: ResolveRequest,
+        req: ResolveRequest,
     ) -> Result<Option<ResolveResult>, PluginError> {
+        let plan = self.plan_for(&req.url, "").await;
+        self.resolve_planned(identity, req, plan).await.0
+    }
+
+    /// 按给定出口计划解析（任务解析由下载管理器结合任务代理 / 备用链路制定计划）。
+    /// 返回值附带计划执行结果：换过路的路径与产出结果的一步（下载据此钉定同一出口）。
+    /// `plan` 为 `None` 时单次调用、走 bridge 的全局出口。
+    pub async fn resolve_planned(
+        &self,
+        identity: &str,
+        mut req: ResolveRequest,
+        plan: Option<EgressPlan>,
+    ) -> (Result<Option<ResolveResult>, PluginError>, EgressOutcome) {
+        let prepared = match self.prepare_resolve(identity, &mut req).await {
+            Ok(prepared) => prepared,
+            Err(error) => return (Err(error), EgressOutcome::default()),
+        };
+        let PreparedResolve {
+            streak,
+            script,
+            settings_json,
+            budget,
+            host,
+            second_stage,
+        } = prepared;
+        let (result, outcome) = self
+            .run_planned(plan, identity, true, |egress| {
+                let req = req.clone();
+                let settings_json = settings_json.clone();
+                let host = HostContext {
+                    egress: egress.clone(),
+                    ..host.clone()
+                };
+                let script = &script;
+                let streak = &streak;
+                async move {
+                    let result = self
+                        .runtime
+                        .invoke_resolve(
+                            script,
+                            req,
+                            settings_json,
+                            self.bridge.clone(),
+                            budget,
+                            host,
+                        )
+                        .await;
+                    self.note_execution(identity, streak, result.as_ref().err(), egress.as_deref())
+                        .await;
+                    result
+                }
+            })
+            .await;
+        let result = result.and_then(|result| {
+            if let Some(res) = &result {
+                validate_resolve_output(res, second_stage)?;
+            }
+            Ok(result)
+        });
+        (result, outcome)
+    }
+
+    /// resolve 的前置校验与调用参数（插件存在 / 启用 / 有 resolver / 必填设置）。
+    async fn prepare_resolve(
+        &self,
+        identity: &str,
+        req: &mut ResolveRequest,
+    ) -> Result<PreparedResolve, PluginError> {
         // 二段解析任务（任务组成员 / 插件订阅条目）的原始链接是分享页，「忽略插件重试」
         // 会被拒绝（见 `clear_task_resolver`），提示里不能再推荐它。
         let escape = if req.resolver_item.is_empty() {
@@ -850,45 +953,149 @@ impl PluginManager {
         }
         // 二段防递归判定须在 req 被 invoke_resolve 消费前捕获。
         let second_stage = !req.resolver_item.is_empty();
+        Ok(PreparedResolve {
+            streak,
+            script,
+            settings_json,
+            budget,
+            host: HostContext {
+                // resolve 平面授予 yt-dlp（直链提取的主战场）；ffmpeg 无产物牢笼故不授予。
+                ytdlp_permitted: manifest.has_permission(PERMISSION_YTDLP),
+                auth_permitted: manifest.has_permission(PERMISSION_AUTH),
+                private_network_allowed: dev_mode,
+                ..Default::default()
+            },
+            second_stage,
+        })
+    }
 
-        let result = self
-            .runtime
-            .invoke_resolve(
-                &script,
-                req,
-                settings_json,
-                self.bridge.clone(),
-                budget,
-                HostContext {
-                    // resolve 平面授予 yt-dlp（直链提取的主战场）；ffmpeg 无产物牢笼故不授予。
-                    ytdlp_permitted: manifest.has_permission(PERMISSION_YTDLP),
-                    auth_permitted: manifest.has_permission(PERMISSION_AUTH),
-                    private_network_allowed: dev_mode,
-                    ..Default::default()
-                },
-            )
-            .await;
-
-        // 熔断计数：连续 Timeout/MemoryLimitExceeded 触发自动禁用。QuickJS 内存
-        // 超限在 JS 侧表现为「out of memory」异常，quickjs.rs 的 reclassify_oom
-        // 已把它归一为 `MemoryLimitExceeded`——OOM 与超时同样计入熔断。
-        match &result {
-            Err(PluginError::Timeout) | Err(PluginError::MemoryLimitExceeded) => {
+    /// 熔断计数：连续 Timeout/MemoryLimitExceeded 触发自动禁用。QuickJS 内存
+    /// 超限在 JS 侧表现为「out of memory」异常，quickjs.rs 的 reclassify_oom
+    /// 已把它归一为 `MemoryLimitExceeded`——OOM 与超时同样计入熔断。超时时仍有
+    /// 网络请求在等（被墙 / 慢网络）不是脚本缺陷：既不计数也不清零。
+    async fn note_execution(
+        &self,
+        identity: &str,
+        streak: &AtomicU32,
+        error: Option<&PluginError>,
+        egress: Option<&CallEgress>,
+    ) {
+        match error {
+            Some(PluginError::Timeout)
+                if egress.is_some_and(|egress| egress.observer().network_caused_timeout()) =>
+            {
+                log_info!("[plugin:{identity}] 超时由网络造成（断网 / 仍在等待网络），不计入熔断");
+            }
+            Some(PluginError::Timeout | PluginError::MemoryLimitExceeded) => {
                 let n = streak.fetch_add(1, Ordering::SeqCst) + 1;
                 if n >= CIRCUIT_BREAKER_THRESHOLD {
                     self.trip_circuit_breaker(identity).await;
                 }
             }
-            _ => {
-                streak.store(0, Ordering::SeqCst);
+            _ => streak.store(0, Ordering::SeqCst),
+        }
+    }
+
+    /// 注入全局出口来源（引擎装配时调用；见 [`Self::plan_for`]）。
+    pub fn attach_egress_source(&self, bridge: Arc<super::bridge::EngineBridge>) {
+        *self
+            .egress_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bridge);
+    }
+
+    /// 非任务调用的出口计划：以 `subject_url` 为源链接、`proxy_url` 为调用自带代理（订阅级
+    /// 代理；空串跟随全局）。未注入出口来源时 `None`（单次调用、bridge 全局出口）。
+    async fn plan_for(&self, subject_url: &str, proxy_url: &str) -> Option<EgressPlan> {
+        let bridge = self
+            .egress_source
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let global = bridge.proxy_config();
+        let subject = subject_url.to_string();
+        let proxy_url = proxy_url.to_string();
+        // System 检测 / Auto 系统候选检测可能起子进程：放进阻塞池。
+        let planned = tokio::task::spawn_blocking(move || {
+            plan_call(
+                &global,
+                &subject,
+                PlanTask {
+                    proxy_url: &proxy_url,
+                    ..PlanTask::default()
+                },
+            )
+        })
+        .await;
+        match planned {
+            Ok(plan) => Some(plan),
+            Err(error) => {
+                crate::logger::report_error("plugin", "plan plugin egress", &error);
+                None
             }
         }
+    }
 
-        let result = result?;
-        if let Some(res) = &result {
-            validate_resolve_output(res, second_stage)?;
+    /// 按出口计划执行一次插件调用：每步一个 [`CallEgress`]；Auto 步失败且 bridge 观测证实
+    /// 断在 fallback 出口的网络层、整机网络可达时，记入 `route_health`（源链接 host）并
+    /// 换下一步重跑。其余失败、非 Auto 步、计划耗尽即返回该次结果。`retry_timeouts`
+    /// 为 `false` 时墙钟超时不重跑（有副作用的调用，见 [`NetObserver::transport_suspect`]）。
+    ///
+    /// [`NetObserver::transport_suspect`]: super::call_egress::NetObserver::transport_suspect
+    pub(crate) async fn run_planned<T, F, Fut>(
+        &self,
+        plan: Option<EgressPlan>,
+        identity: &str,
+        retry_timeouts: bool,
+        mut call: F,
+    ) -> (Result<T, PluginError>, EgressOutcome)
+    where
+        F: FnMut(Option<Arc<CallEgress>>) -> Fut,
+        Fut: Future<Output = Result<T, PluginError>>,
+    {
+        let Some(EgressPlan { steps, rules, host }) = plan else {
+            return (call(None).await, EgressOutcome::default());
+        };
+        let mut outcome = EgressOutcome {
+            host,
+            ..EgressOutcome::default()
+        };
+        let mut steps = steps.into_iter().peekable();
+        while let Some(step) = steps.next() {
+            let egress = Arc::new(CallEgress::new(
+                step.proxy.clone(),
+                step.explicit,
+                rules.clone(),
+            ));
+            let error = match call(Some(Arc::clone(&egress))).await {
+                Ok(value) => {
+                    outcome.used = Some(step);
+                    return (Ok(value), outcome);
+                }
+                Err(error) => error,
+            };
+            let Some(route) = step.route else {
+                return (Err(error), outcome);
+            };
+            if !egress.observer().transport_suspect(&error, retry_timeouts)
+                || !crate::route_health::network_reachable()
+            {
+                return (Err(error), outcome);
+            }
+            if let Some(host) = &outcome.host {
+                crate::route_health::record_path_failure(host, route, &self.db);
+            }
+            outcome.failed.push(route);
+            match steps.peek() {
+                Some(next) => log_info!(
+                    "[plugin:{identity}] 经{}的请求断在网络层（{error}），改经{}重试",
+                    route_name(Some(route)),
+                    route_name(next.route)
+                ),
+                None => return (Err(with_tried_routes(error, &outcome.failed)), outcome),
+            }
         }
-        Ok(result)
+        (call(None).await, outcome)
     }
 
     /// 执行插件平台登录入口。登录状态由插件通过 `flux.auth.save` 写入宿主，
@@ -980,20 +1187,36 @@ impl PluginManager {
         };
         let action = req.action.clone();
         let requested_auth_ref = req.auth_ref.clone();
-        let invocation = self
-            .runtime
-            .invoke_auth(
-                &script,
-                req,
-                build_typed_settings_json(&manifest, &values),
-                self.bridge.clone(),
-                self.auth_budget_for(&manifest),
-                HostContext {
-                    auth_permitted: true,
-                    private_network_allowed: dev_mode,
-                    ..Default::default()
-                },
-            )
+        // 登录流程的出口以站点为源链接：与该站点的解析 / 下载同一套规则与 Auto 换路。
+        let subject = crate::auth::normalize_site(&req.site)
+            .map(|site| format!("{site}/"))
+            .unwrap_or_default();
+        let plan = self.plan_for(&subject, "").await;
+        let settings_json = build_typed_settings_json(&manifest, &values);
+        let budget = self.auth_budget_for(&manifest);
+        let script = &script;
+        let (invocation, _) = self
+            .run_planned(plan, identity, false, |egress| {
+                let req = req.clone();
+                let settings_json = settings_json.clone();
+                async move {
+                    self.runtime
+                        .invoke_auth(
+                            script,
+                            req,
+                            settings_json,
+                            self.bridge.clone(),
+                            budget,
+                            HostContext {
+                                auth_permitted: true,
+                                private_network_allowed: dev_mode,
+                                egress,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                }
+            })
             .await;
         if action == "logout" && !requested_auth_ref.is_empty() {
             self.bridge
@@ -1076,43 +1299,60 @@ impl PluginManager {
             version,
             app_version: self.app_version.clone(),
         };
-        let result = self
-            .runtime
-            .invoke_subscription(
-                &script,
-                SubscriptionRequest {
-                    provider_id: provider_id.to_string(),
-                    source_id: request.source_id,
-                    url: request.url,
-                    provider_config: if request.provider_config.trim().is_empty() {
-                        "{}".to_string()
-                    } else {
-                        request.provider_config
-                    },
-                    cookies: request.cookies,
-                    user_agent: request.user_agent,
-                },
-                build_typed_settings_json(&manifest, &values),
-                self.bridge.clone(),
-                budget,
-                HostContext {
-                    ytdlp_permitted: manifest.has_permission(PERMISSION_YTDLP),
-                    auth_permitted: manifest.has_permission(PERMISSION_AUTH),
-                    private_network_allowed: dev_mode,
-                    ..Default::default()
-                },
-            )
-            .await;
-
-        match &result {
-            Err(PluginError::Timeout) | Err(PluginError::MemoryLimitExceeded) => {
-                let n = streak.fetch_add(1, Ordering::SeqCst) + 1;
-                if n >= CIRCUIT_BREAKER_THRESHOLD {
-                    self.trip_circuit_breaker(&identity).await;
+        // 订阅出口：订阅自带代理（与任务自带代理同语义）> 订阅链接命中的站点规则 > 全局模式
+        // （Auto 断在网络层时换路重跑）。
+        let plan = self.plan_for(&request.url, &request.proxy_url).await;
+        let subscription = SubscriptionRequest {
+            provider_id: provider_id.to_string(),
+            source_id: request.source_id,
+            url: request.url,
+            provider_config: if request.provider_config.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                request.provider_config
+            },
+            cookies: request.cookies,
+            user_agent: request.user_agent,
+        };
+        let settings_json = build_typed_settings_json(&manifest, &values);
+        let host = HostContext {
+            ytdlp_permitted: manifest.has_permission(PERMISSION_YTDLP),
+            auth_permitted: manifest.has_permission(PERMISSION_AUTH),
+            private_network_allowed: dev_mode,
+            ..Default::default()
+        };
+        let (script, streak, identity_ref) = (&script, &streak, identity.as_str());
+        let (result, _) = self
+            .run_planned(plan, identity_ref, true, |egress| {
+                let subscription = subscription.clone();
+                let settings_json = settings_json.clone();
+                let host = HostContext {
+                    egress: egress.clone(),
+                    ..host.clone()
+                };
+                async move {
+                    let result = self
+                        .runtime
+                        .invoke_subscription(
+                            script,
+                            subscription,
+                            settings_json,
+                            self.bridge.clone(),
+                            budget,
+                            host,
+                        )
+                        .await;
+                    self.note_execution(
+                        identity_ref,
+                        streak,
+                        result.as_ref().err(),
+                        egress.as_deref(),
+                    )
+                    .await;
+                    result
                 }
-            }
-            _ => streak.store(0, Ordering::SeqCst),
-        }
+            })
+            .await;
 
         let raw = result?;
         parse_subscription_output(&raw)
@@ -1179,6 +1419,8 @@ impl PluginManager {
                 ytdlp_permitted,
                 auth_permitted,
                 private_network_allowed: p.dev,
+                // 通知钩子 fire-and-forget、不重跑：按全局规则 + 全局模式选出口。
+                egress: None,
             };
             // 授权外部工具（ffmpeg 有产物牢笼 / yt-dlp 任意上下文）→ 抬升墙钟预算。
             let budget = if (ffmpeg_permitted && host.ffmpeg_root.is_some()) || ytdlp_permitted {

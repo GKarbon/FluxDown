@@ -57,6 +57,7 @@
 - **插件状态变化必须经 `PluginManager::publish_state` 广播，不能只发 `PluginAutoDisabled`**：熔断曾只发 `PluginAutoDisabled`，GPUI 贡献点（任务右键命令 / 详情页签 / 活动页）只认 `PluginsChanged` 而一直残留；插件 `flux.settings.update`、站点默认写入也曾无事件，两端显示旧值。新写入点一律在结束时调 `publish_state`，daemon handler 不再自己发 → `native/engine/src/plugin/manager.rs::publish_state`、回归 `circuit_breaker_trip_publishes_disabled_state_before_notice` / `host_settings_update_publishes_new_values`。
 - **二段解析任务绝不能以原始链接起跑**：组成员 / 插件订阅条目的 `url` 是分享页，绑定被清空（卸载、旧版 fail-closed 行、忽略插件重试）后起跑会把 HTML 存成文件。起跑 / 恢复 / 解析回流都要先重绑、无插件即 fail-closed，`ignoreRetry` 对其拒绝 → `native/engine/src/download_manager.rs::{rebind_second_stage,fail_second_stage_unavailable}`、回归 `native/engine/tests/engine/plugin_state_freshness.rs`。
 - **预解析与建组必须用同一个插件**：成员任务曾在建组时按 `route_resolver` 重选（含非 multi 插件、字母序取首个），与预解析用的 `match_multi_resolver` 不一致就把 `resolverItem` 交给别的插件。客户端回传 `ResolvePreviewResponse.pluginId` → `CreateGroupRequest.resolverPluginId`（GPUI / Web / iOS） → `download_manager.rs::plugin_bind_resolver`。
+- **插件解析出的媒体直链常绑定解析时的出口 IP（googlevideo `ip=`、网盘签名链接），下载必须走同一出口**：Auto 下解析曾恒直连、下载却按先验 / 多路径 / 换路走代理，换路重试时还先重新解析（仍直连）再强制走代理，结果 403 且 403 不触发换路；站点规则又只按媒体链接匹配，`youtube.com` 规则管不到 googlevideo。现在解析按源链接制定出口计划并在 Auto 断网时换路重跑，下载以源链接定出口、Auto 下单路径钉在解析所用路径、禁用多网卡；Auto 换路判据来自 bridge 的类型化观测（被墙时多为墙钟超时而非插件抛错文案）→ `native/engine/src/plugin/call_egress.rs`、`native/engine/src/plugin/manager.rs::run_planned`、`native/engine/src/download_manager.rs::{resolve_egress_plan,absorb_resolve_egress,take_start_route}`，回归 `native/engine/tests/engine/plugin_resolve_egress.rs`。
 
 ## daemon / agent 本机服务
 
@@ -87,6 +88,7 @@
 - **进度 / 完成窗口里「打开文件 / 文件夹」不等打开命令返回**：Windows 上它要等系统打开调用返回，可能比对方出现在前台还晚，窗口该关而不关；会关窗时点击即请宿主等对方接管前台 → `crates/downloads/src/pages/progress_window.rs::hand_off`。
 - **Windows / Linux 标题栏菜单（gpui-component `AppMenuBar`）以「打开菜单时的焦点」为派发目标**：焦点为空（启动后未点列表）、在标题栏搜索框或不在下载页时，挂在下载页元素上的动作只沿标题栏冒泡、点了无效，且菜单项从不置灰；下载页动作须有应用级兜底（切到下载页、聚焦后派发；焦点已在下载页内视为下载页主动让出，不接管）。兜底里 `update` 窗口必须用 `AnyWindowHandle`，`WindowHandle<V>` 会租借根视图，冒泡到根视图监听器即 panic → `crates/app/src/menus.rs::dispatch_in_downloads`。
 - **GPUI 剪贴板写不了文件**：`ClipboardEntry::ExternalPaths` 在 gpui-fast 三个平台的写入路径都是空操作（macOS `pasteboard.rs::write`、Windows `clipboard.rs::write_to_clipboard`、Linux 只 `set_text`），`cx.write_to_clipboard` 不报错但剪贴板没有文件；「复制文件」改由常驻 agent 经 arboard `Set::file_list` 写入（Linux X11 内容归写入进程，实例须常驻）→ `native/agent/src/platform/clipboard_files.rs`、入口 `crates/downloads/src/pages/task_copy.rs`。
+- **`overflow_y_scrollbar` 页面里的定高 `uniform_list` 收不到滚轮**：gpui-kit `Scrollable` 内的 `ScrollBounce` 在捕获阶段认领指针下的滚轮并 `stop_propagation`，裸 `uniform_list` 只在冒泡阶段滚动，于是列表纹丝不动、只有页面在滚；内嵌列表须 `track_scroll` 一个 `UniformListScrollHandle` 并自己包一层 `gpui_base::ScrollBounce`（最内层认领者生效，内容不溢出时不认领、滚轮交还页面），再挂 `vertical_scrollbar` → `crates/share/src/network.rs::nested_list`。
 
 ## Web SPA
 

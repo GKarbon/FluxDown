@@ -514,6 +514,7 @@ impl RssManager {
             } else {
                 source.user_agent.clone()
             },
+            proxy_url: source.proxy_url.clone(),
             proxy: ProxyConfig::default(),
             egress: None,
         };
@@ -528,10 +529,9 @@ impl RssManager {
         // ProxyConfig::resolve() 把非 coordinator 路径的 Auto 折算成
         // 直连（见该函数文档），只有 HTTP 下载 coordinator 消费 auto_proxy
         // 的采样/决策。RSS 抓取独立于 coordinator，因此这里直连失败时按
-        // 「手动代理 → 系统代理」候选顺序手动重试一遍。仅内置 RSS provider
-        // 遵从 `request.proxy`（插件 provider 走 bridge 全局出口，订阅级
-        // 代理对其不生效，见 [`SubscriptionFetchRequest::proxy`] 文档），
-        // 所以只对它启用失败转移，避免对插件做无意义的重复抓取。
+        // 「手动代理 → 系统代理」候选顺序手动重试一遍。只对内置 RSS provider
+        // 启用：插件 provider 由插件层按订阅代理 / 站点规则 / Auto 计划自行换路
+        // （见 [`SubscriptionFetchRequest::proxy_url`]），这里再套一层会重复抓取。
         let eligible = source.proxy_url.is_empty()
             && proxy.mode == ProxyMode::Auto
             && !route.rule_hit
@@ -633,6 +633,7 @@ impl RssManager {
             } else {
                 user_agent
             },
+            proxy_url: proxy_url.clone(),
             proxy: ProxyConfig::default(),
             egress: None,
         };
@@ -642,7 +643,7 @@ impl RssManager {
         // 新建订阅向导/REST 验证同样只拿到折算后的直连配置，Auto 模式下
         // 补一次候选代理重试，避免把「直连探测失败」误判为订阅地址本身
         // 不可用（用户此前需手动切到 System 模式才能通过验证）。插件 provider
-        // 不消费订阅级代理，与 `dispatch_fetch` 一样不做失败转移。
+        // 由插件层自行换路，与 `dispatch_fetch` 一样不在这里做失败转移。
         let eligible = proxy_url.is_empty()
             && proxy.mode == ProxyMode::Auto
             && !route.rule_hit
@@ -755,6 +756,7 @@ impl RssManager {
             } else {
                 plan.user_agent.clone()
             },
+            proxy_url: plan.proxy_url.clone(),
             proxy: ProxyConfig::default(),
             egress: None,
         };

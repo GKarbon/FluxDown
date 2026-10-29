@@ -380,6 +380,10 @@ pub struct BridgeHttpRequest {
     /// 允许访问环回 / 私网等非公网地址，便于连接本机服务联调。
     #[serde(skip)]
     pub private_network_allowed: bool,
+    /// 由运行时注入：本次插件调用的出口（见 [`super::call_egress`]）。`None` = 无调用级
+    /// 出口（常驻宿主、通知钩子等），bridge 按全局规则 + 全局模式选出口。
+    #[serde(skip)]
+    pub egress: Option<Arc<super::call_egress::CallEgress>>,
 }
 
 impl Default for BridgeHttpRequest {
@@ -392,6 +396,7 @@ impl Default for BridgeHttpRequest {
             auth_ref: None,
             auth_allowed: false,
             private_network_allowed: false,
+            egress: None,
         }
     }
 }
@@ -474,6 +479,9 @@ pub struct YtdlpSpec {
     /// 从脚本墙钟里扣除，避免排队被误判为插件自身超时。
     #[serde(skip)]
     pub wall_pause: Option<Arc<WallPause>>,
+    /// 宿主在 JS 边界注入：本次插件调用的出口（见 [`BridgeHttpRequest::egress`]）。
+    #[serde(skip)]
+    pub egress: Option<Arc<super::call_egress::CallEgress>>,
 }
 
 /// 累计「不应计入脚本墙钟」的排队等待时长（含进行中的等待）。
@@ -565,6 +573,8 @@ pub struct HostContext {
     /// 插件是否为开发模式（「从目录安装」）。仅此类插件的 `flux.fetch` 可访问
     /// 非公网地址（环回 / 私网）；正式安装的插件恒为 false。
     pub private_network_allowed: bool,
+    /// 本次调用的出口（见 [`super::call_egress`]）；`None` = 全局出口。
+    pub egress: Option<Arc<super::call_egress::CallEgress>>,
 }
 
 // ---------------------------------------------------------------------------

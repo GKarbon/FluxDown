@@ -368,6 +368,7 @@ async fn adopt_alternate(
         // 多 CDN 钉定节点是直连 IP：起飞改走代理后不得再旁路代理。
         params.cdn.enabled = false;
     }
+    crate::intercept::sync_egress(params);
     params.auto_proxy = Some(Arc::new(AutoProxyCtx {
         host: ctx.host.clone(),
         user_agent: ctx.user_agent.clone(),
