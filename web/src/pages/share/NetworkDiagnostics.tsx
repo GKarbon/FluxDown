@@ -3,8 +3,9 @@
 // 页签挂载期间才轮询；切走即停。
 
 import { Copy, RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '../../i18n'
+import { cn } from '../../lib/cn'
 import { copyText } from '../../lib/copy'
 import { RpcError, rpc } from '../../lib/rpc'
 import type { ShareLogLevel, ShareLogLineDto, ShareNetSnapshotDto } from '../../lib/rpc'
@@ -192,10 +193,18 @@ function Logs() {
   )
 }
 
-export function NetworkDiagnostics() {
+/** `focusSessionId`：从分享面板的「诊断此会话」进入时要聚焦的会话（滚动到视野中央并高亮）。 */
+export function NetworkDiagnostics({ focusSessionId = null }: { focusSessionId?: string | null }) {
   const t = useT()
   const { data } = useShareDiagnostics({ intervalMs: 5000 })
   const snapshot = data?.snapshot ?? null
+  const focusedRef = useRef(false)
+  const focusPresent = focusSessionId !== null && (data?.sessions.some((session) => session.sessionId === focusSessionId) ?? false)
+  useEffect(() => {
+    if (!focusPresent || focusedRef.current) return
+    focusedRef.current = true
+    document.getElementById(`share-session-${focusSessionId}`)?.scrollIntoView({ block: 'center' })
+  }, [focusPresent, focusSessionId])
   const copySnapshot = useCallback(() => {
     if (!data) return
     copyText(data.snapshotJson)
@@ -216,7 +225,11 @@ export function NetworkDiagnostics() {
         <Section title={t('shareNetSessions')}>
           <ul className="flex flex-col gap-3">
             {data.sessions.map((session) => (
-              <li key={session.sessionId} className="rounded-md border border-hairline p-3">
+              <li
+                key={session.sessionId}
+                id={`share-session-${session.sessionId}`}
+                className={cn('rounded-md border p-3', session.sessionId === focusSessionId ? 'border-primary' : 'border-hairline')}
+              >
                 <SessionDetailView detail={session} />
               </li>
             ))}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ShareUsageDto, ShareDto, ShareNetStatusDto, ShareReceiveRecordDto, ShareTaskFactsDto } from '../../lib/rpc'
+import type { ShareUsageDto, ShareDto, ShareNetStatusDto, ShareTaskFactsDto } from '../../lib/rpc'
 import {
   appealState,
   shareActionApplies,
@@ -22,26 +22,31 @@ import {
   cloudRetryTierId,
   claimOptions,
   currentPathId,
-  extractShareLinks,
+  extractShareItems,
   findExistingShare,
   formatPickupCode,
   isPickupCode,
-  mergeReceiveRecords,
+  isPickupCodeItem,
   netStatusLine,
   netSummary,
   normalizePickupDigits,
-  parseShareInput,
   parseShareLink,
+  pickupCodeInLine,
+  pickupCodeLength,
+  providingRecordId,
   reasonTextKey,
   retentionTiers,
   progressPercent,
   rateLabel,
-  removeShareLink,
+  removeShareItem,
   shareDisabledKey,
   shareDisplayStatus,
+  shareLinkInLine,
+  shareMetaLine,
   shareNoticeKey,
   shareSourceBadge,
   sortShares,
+  usageSummaryLine,
   sourceBytesRows,
   SESSION_ROLE_KEYS,
   servedFileLabel,
@@ -51,6 +56,7 @@ import {
   uploadPercent,
   uploadProgressText,
 } from './model'
+import { parseInput } from '../downloads/dialogs/model'
 
 const dict: Record<string, string> = {
   shareDurationHours: '{count} h',
@@ -66,6 +72,8 @@ const dict: Record<string, string> = {
   shareIpv6On: 'IPv6',
   shareIpv6Off: 'no IPv6',
   shareRelayLatency: 'relay {ms} ms',
+  shareFilesCount: '{count} files',
+  shareExpiresAt: '{time} expires',
 }
 const t = (key: string, params?: Record<string, string | number>): string => {
   let text = dict[key] ?? key
@@ -138,6 +146,36 @@ describe('pickup code', () => {
     expect(isPickupCode('12a456')).toBe(false)
     expect(isPickupCode('')).toBe(false)
   })
+
+  test('pickup code length falls back to 6 when the cloud sends 0', () => {
+    expect(pickupCodeLength({ pickupCodeLength: 0 })).toBe(6)
+    expect(pickupCodeLength({ pickupCodeLength: 8 })).toBe(8)
+  })
+
+  test('pickup code line: separators stripped, exact ASCII digit count, wire value is the digits', () => {
+    for (const text of ['123456', '123 456', '123-456', '  123456  ', '1-2 3\t4-5 6']) {
+      expect(pickupCodeInLine(text, 6)).toBe('123456')
+      expect(extractShareItems(text, 6)).toEqual(['123456'])
+    }
+    // 长度 0（云端未下发）按默认 6 位；云端配置其他位数时按该位数识别。
+    expect(pickupCodeInLine('123456', pickupCodeLength({ pickupCodeLength: 0 }))).toBe('123456')
+    expect(extractShareItems('1234 5678', 8)).toEqual(['12345678'])
+    expect(extractShareItems('123456', 8)).toEqual([])
+  })
+
+  test('wrong length or decorated numbers are not pickup codes', () => {
+    for (const text of ['12345', '1234567', '12 34 5', '123456 note', 'code 123456', '12345a', '１２３４５６', '123.456', '-', '']) {
+      expect(pickupCodeInLine(text)).toBeNull()
+      expect(extractShareItems(text)).toEqual([])
+    }
+  })
+
+  test('pending items tell codes from links', () => {
+    expect(isPickupCodeItem('123456')).toBe(true)
+    expect(isPickupCodeItem('')).toBe(false)
+    expect(isPickupCodeItem(`fluxdown://share/${SLUG}`)).toBe(false)
+    expect(isPickupCodeItem(`https://fluxdown.com/s/${SLUG}`)).toBe(false)
+  })
 })
 
 describe('share link detection', () => {
@@ -159,11 +197,15 @@ describe('share link detection', () => {
     expect(parseShareLink(`https://fluxdown.com/s/${SLUG} https://a.b/c`)).toBeNull()
   })
 
-  test('input is a code, a link, or nothing', () => {
-    expect(parseShareInput('123 456')).toEqual({ kind: 'code', value: '123456' })
-    expect(parseShareInput(`fluxdown://share/${SLUG}`)).toEqual({ kind: 'link', value: `fluxdown://share/${SLUG}`, scheme: 'deeplink' })
-    expect(parseShareInput('hello')).toBeNull()
-    expect(parseShareInput('12345')).toBeNull()
+  test('a share link followed by a note is still a pending item (leading word, like GPUI)', () => {
+    const deep = `fluxdown://share/${SLUG}`
+    const https = `https://fluxdown.com/s/${SLUG}`
+    expect(shareLinkInLine(`  ${deep}  来自小明的电脑`)).toBe(deep)
+    expect(shareLinkInLine(`${https}\t备注`)).toBe(https)
+    expect(shareLinkInLine(`备注 ${deep}`)).toBeNull()
+    expect(shareLinkInLine(`# ${deep}`)).toBeNull()
+    expect(extractShareItems(`${deep} 第一份\n${deep}\n${https} note`)).toEqual([deep, https])
+    expect(removeShareItem(`a\n${deep} 第一份\nb`, deep)).toBe('a\nb')
   })
 })
 
@@ -214,23 +256,44 @@ describe('source badge', () => {
   })
 
   test('only share-receive tasks get a badge', () => {
-    expect(shareSourceBadge(undefined)).toBeNull()
-    expect(shareSourceBadge(facts({ isShareReceive: false }))).toBeNull()
+    expect(shareSourceBadge(undefined, 'downloading')).toBeNull()
+    expect(shareSourceBadge(facts({ isShareReceive: false }), 'downloading')).toBeNull()
   })
 
   test('badge label and tone follow the path', () => {
-    expect(shareSourceBadge(facts({}))).toEqual({ pathKind: 'directLan', labelKey: 'sharePathDirectLan', tone: 'success', peers: 0 })
-    expect(shareSourceBadge(facts({ pathKind: 'directWan' }))?.tone).toBe('success')
-    expect(shareSourceBadge(facts({ pathKind: 'relay' }))).toEqual({ pathKind: 'relay', labelKey: 'sharePathRelay', tone: 'warning', peers: 0 })
-    expect(shareSourceBadge(facts({ pathKind: 'cdn' }))).toEqual({ pathKind: 'cdn', labelKey: 'shareBadgeCloud', tone: 'success', peers: 0 })
-    expect(shareSourceBadge(facts({ pathKind: 'bridge' }))).toEqual({ pathKind: 'bridge', labelKey: 'shareBadgeBridge', tone: 'neutral', peers: 0 })
-    expect(shareSourceBadge(facts({ pathKind: 'unknown' }))?.tone).toBe('neutral')
-    expect(shareSourceBadge(facts({ pathKind: 'swarm', swarmPeers: 3 }))).toEqual({ pathKind: 'swarm', labelKey: 'sharePathSwarm', tone: 'success', peers: 3 })
-    expect(shareSourceBadge(facts({ swarmBlock: 'quotaExhausted' }))?.swarmBlockKey).toBe('shareSwarmQuotaChip')
-    expect(shareSourceBadge(facts({ swarmBlock: 'loginRequired' }))?.swarmBlockKey).toBe('shareSwarmLoginChip')
-    expect(shareSourceBadge(facts({ swarmBlock: 'unknown' }))?.swarmBlockKey).toBeUndefined()
+    expect(shareSourceBadge(facts({}), 'downloading')).toEqual({ pathKind: 'directLan', labelKey: 'sharePathDirectLan', tone: 'success', peers: 0 })
+    expect(shareSourceBadge(facts({ pathKind: 'directWan' }), 'pending')?.tone).toBe('success')
+    expect(shareSourceBadge(facts({ pathKind: 'relay' }), 'downloading')).toEqual({ pathKind: 'relay', labelKey: 'sharePathRelay', tone: 'warning', peers: 0 })
+    expect(shareSourceBadge(facts({ pathKind: 'cdn' }), 'downloading')).toEqual({ pathKind: 'cdn', labelKey: 'shareBadgeCloud', tone: 'success', peers: 0 })
+    expect(shareSourceBadge(facts({ pathKind: 'bridge' }), 'downloading')).toEqual({ pathKind: 'bridge', labelKey: 'shareBadgeBridge', tone: 'neutral', peers: 0 })
+    expect(shareSourceBadge(facts({ pathKind: 'unknown' }), 'downloading')?.tone).toBe('neutral')
+    expect(shareSourceBadge(facts({ pathKind: 'swarm', swarmPeers: 3 }), 'downloading')).toEqual({ pathKind: 'swarm', labelKey: 'sharePathSwarm', tone: 'success', peers: 3 })
+    expect(shareSourceBadge(facts({ swarmBlock: 'quotaExhausted' }), 'downloading')?.swarmBlockKey).toBe('shareSwarmQuotaChip')
+    expect(shareSourceBadge(facts({ swarmBlock: 'loginRequired' }), 'downloading')?.swarmBlockKey).toBe('shareSwarmLoginChip')
+    expect(shareSourceBadge(facts({ swarmBlock: 'unknown' }), 'downloading')?.swarmBlockKey).toBeUndefined()
     expect(sourceBytesRows({ direct: 0, relay: 0, cdn: 0, bridge: 0, peer: 9 }).map((row) => [row.kind, row.bytes]).at(-1)).toEqual(['peer', 9])
     expect(bytesSplit({ direct: 1, relay: 0, cdn: 0, bridge: 0, peer: 3 }).percent).toBe(25)
+  })
+
+  test('a completed task only shows the sharing badge while its record is still providing', () => {
+    const providing = facts({ pathKind: 'unknown', sessionId: null, provideState: 'providing', recordId: 'r1' })
+    expect(shareSourceBadge(providing, 'completed')).toEqual({ pathKind: 'unknown', labelKey: 'shareProvidingBadge', tone: 'success', peers: 0 })
+    expect(shareSourceBadge(facts({ provideState: 'ended' }), 'completed')).toBeNull()
+    expect(shareSourceBadge(facts({ provideState: 'stopped' }), 'completed')).toBeNull()
+    expect(shareSourceBadge(facts({}), 'completed')).toBeNull()
+    expect(shareSourceBadge(facts({ isShareReceive: false, provideState: 'providing' }), 'completed')).toBeNull()
+    // 进行中的任务照常按路径显示，不受共享状态影响。
+    expect(shareSourceBadge(facts({ provideState: 'providing' }), 'downloading')?.labelKey).toBe('sharePathDirectLan')
+  })
+
+  test('stop-sharing needs a providing record with an id', () => {
+    expect(providingRecordId(facts({ provideState: 'providing', recordId: 'r1' }))).toBe('r1')
+    expect(providingRecordId(facts({ provideState: 'providing', recordId: null }))).toBeNull()
+    expect(providingRecordId(facts({ provideState: 'providing' }))).toBeNull()
+    expect(providingRecordId(facts({ provideState: 'ended', recordId: 'r1' }))).toBeNull()
+    expect(providingRecordId(facts({ provideState: 'off', recordId: 'r1' }))).toBeNull()
+    expect(providingRecordId(facts({ isShareReceive: false, provideState: 'providing', recordId: 'r1' }))).toBeNull()
+    expect(providingRecordId(undefined)).toBeNull()
   })
 
   test('bridge switch is offered on active share-receive tasks not already on the bridge', () => {
@@ -306,25 +369,13 @@ describe('lists', () => {
     expect(list[0]?.id).toBe('stopped')
   })
 
-  const record = (id: string, startedAt: string, status: ShareReceiveRecordDto['status']): ShareReceiveRecordDto => ({
-    id,
-    shareId: null,
-    title: id,
-    senderDeviceName: '',
-    fileCount: 1,
-    totalBytes: 1,
-    taskIds: [],
-    startedAt,
-    status,
-  })
-
-  test('receive records: live snapshot wins over paged, newest first', () => {
-    const merged = mergeReceiveRecords(
-      [record('b', '2026-10-26T10:00:00Z', 'completed')],
-      [record('b', '2026-10-26T10:00:00Z', 'active'), record('a', '2026-10-25T10:00:00Z', 'failed'), record('c', 'bad', 'failed')],
-    )
-    expect(merged.map((item) => item.id)).toEqual(['b', 'a', 'c'])
-    expect(merged[0]?.status).toBe('completed')
+  test('share meta line: files · size · expiry, expiry omitted when the time is invalid', () => {
+    const base = { files: [{ name: 'a', size: 1 }, { name: 'b', size: 2 }], totalBytes: 1536 }
+    expect(shareMetaLine(t, { ...base, expiresAt: 'not a time' })).toBe('2 files · 1.5 KB')
+    const withExpiry = shareMetaLine(t, { ...base, expiresAt: '2026-10-27T12:00:00Z' })
+    expect(withExpiry.startsWith('2 files · 1.5 KB · ')).toBe(true)
+    expect(withExpiry.endsWith(' expires')).toBe(true)
+    expect(shareMetaLine(t, { files: [], totalBytes: 0, expiresAt: '' })).toBe('0 files · 0 B')
   })
 })
 
@@ -332,21 +383,44 @@ describe('new download paste', () => {
   const deep = `fluxdown://share/${SLUG}`
   const https = `https://fluxdown.com/s/${SLUG}`
 
-  test('share links are found line by line; one is removed without touching the rest', () => {
+  test('share items are found line by line; one is removed without touching the rest', () => {
     const text = `https://example.com/a.zip\n${deep}\n  out=a.zip\n${https}\r\n# note`
-    expect(extractShareLinks(text).map((ref) => ref.link)).toEqual([deep, https])
-    expect(removeShareLink(text, deep)).toBe(`https://example.com/a.zip\n  out=a.zip\n${https}\n# note`)
-    expect(removeShareLink(`${deep}\n${deep}`, deep)).toBe(deep)
-    expect(removeShareLink('https://example.com/a.zip', deep)).toBe('https://example.com/a.zip')
-    expect(extractShareLinks('https://example.com/a.zip')).toEqual([])
+    expect(extractShareItems(text)).toEqual([deep, https])
+    expect(removeShareItem(text, deep)).toBe(`https://example.com/a.zip\n  out=a.zip\n${https}\n# note`)
+    expect(removeShareItem(`${deep}\n${deep}`, deep)).toBe(deep)
+    expect(removeShareItem('https://example.com/a.zip', deep)).toBe('https://example.com/a.zip')
+    expect(extractShareItems('https://example.com/a.zip')).toEqual([])
+    // 取件码按纯数字串匹配，分组写法的行同样被拿走。
+    expect(removeShareItem('https://a.example/x.zip\n123 456\n654321', '123456')).toBe('https://a.example/x.zip\n654321')
   })
 
-  test('notice depends on availability, count and mixing', () => {
-    expect(shareNoticeKey(0, 3, true)).toBeNull()
-    expect(shareNoticeKey(1, 0, false)).toBe('shareNewDownloadUnavailable')
-    expect(shareNoticeKey(2, 0, true)).toBe('shareNewDownloadMultiple')
-    expect(shareNoticeKey(1, 2, true)).toBe('shareNewDownloadMixed')
-    expect(shareNoticeKey(1, 0, true)).toBe('shareNewDownloadLink')
+  test('codes mix with links and ordinary entries, deduped by value in order of appearance', () => {
+    const text = `https://a.example/one.zip\n123 456\n${deep}\n123-456\n  654321\nmagnet:?xt=urn:btih:xyz`
+    expect(parseInput(text, false).entries.map((entry) => entry.url)).toEqual(['https://a.example/one.zip', 'magnet:?xt=urn:btih:xyz'])
+    expect(extractShareItems(text, 6)).toEqual(['123456', deep, '654321'])
+    expect(parseInput(text, false).entries[0]?.fileName).toBe('')
+  })
+
+  test('a bare code line never becomes a download entry', () => {
+    for (const text of ['123456', '123 456', '123-456', '  123456  ', '1-2 3\t4-5 6']) expect(parseInput(text, false).entries).toEqual([])
+  })
+
+  test('notice follows pending share items (same table as GPUI share_note) plus the unavailable case', () => {
+    // (entries, pending, pendingCodes)
+    expect(shareNoticeKey(3, 0, 0, true)).toBeNull()
+    expect(shareNoticeKey(0, 0, 0, true)).toBeNull()
+    expect(shareNoticeKey(0, 1, 0, true)).toBe('shareNewDownloadLink')
+    expect(shareNoticeKey(0, 1, 1, true)).toBe('shareNewDownloadCode')
+    expect(shareNoticeKey(2, 1, 0, true)).toBe('shareNewDownloadMixed')
+    expect(shareNoticeKey(2, 1, 1, true)).toBe('shareNewDownloadMixed')
+    expect(shareNoticeKey(0, 3, 0, true)).toBe('shareNewDownloadMultiple')
+    expect(shareNoticeKey(0, 2, 1, true)).toBe('shareNewDownloadMultiple')
+    expect(shareNoticeKey(5, 2, 2, true)).toBe('shareNewDownloadMultiple')
+    // FluxMesh 不可用：取件码与链接同样说明无法接收，不静默忽略。
+    expect(shareNoticeKey(0, 1, 1, false)).toBe('shareNewDownloadUnavailable')
+    expect(shareNoticeKey(0, 1, 0, false)).toBe('shareNewDownloadUnavailable')
+    expect(shareNoticeKey(2, 3, 1, false)).toBe('shareNewDownloadUnavailable')
+    expect(shareNoticeKey(2, 0, 0, false)).toBeNull()
   })
 })
 
@@ -544,6 +618,28 @@ describe('usage helpers', () => {
     expect(meters[0]).toMatchObject({ exhausted: true, ratio: 1 })
     expect(meters[1]).toMatchObject({ unlimited: true, exhausted: false, ratio: 0 })
     expect(meters[2].ratio).toBe(0.5)
+  })
+  test('summary line: exhausted first, else tightest remaining, else unlimited', () => {
+    const k = (kind: string, o: object) => ({ kind, unlimited: false, monthlyAllowance: 100, usedThisMonth: 0, remaining: 100, reserved: 0, ...o })
+    const line = (kinds: object[]) => usageSummaryLine(usageMeters({ kinds } as unknown as ShareUsageDto))
+    expect(line([])).toBeNull()
+    expect(line([k('weird', {})])).toBeNull()
+    // 已用完优先于剩余比例更低的项；多个已用完取云端顺序里的第一个。
+    const exhausted = line([k('swarm', { remaining: 5 }), k('download', { remaining: 0 }), k('upload', { remaining: 0 })])
+    expect(exhausted).toMatchObject({ kind: 'exhausted', meter: { kind: 'download' } })
+    // 否则剩余比例最低的限额项；不限项不参与。
+    const tight = line([k('swarm', { unlimited: true }), k('download', { remaining: 80 }), k('upload', { remaining: 20 })])
+    expect(tight).toMatchObject({ kind: 'remaining', meter: { kind: 'upload' } })
+    // 比例按剩余 / 月赠送，而不是绝对字节。
+    const ratio = line([k('swarm', { monthlyAllowance: 1000, remaining: 300 }), k('download', { monthlyAllowance: 10, remaining: 2 })])
+    expect(ratio).toMatchObject({ kind: 'remaining', meter: { kind: 'download' } })
+    // 平手保持云端顺序；月赠送为 0 但仍有剩余（流量包）按 100% 计，不抢占。
+    expect(line([k('swarm', { remaining: 50 }), k('download', { remaining: 50 })])).toMatchObject({ meter: { kind: 'swarm' } })
+    expect(line([k('swarm', { monthlyAllowance: 0, remaining: 7 }), k('download', { remaining: 90 })])).toMatchObject({ meter: { kind: 'download' } })
+    // 剩余超过月赠送（结转 / 流量包）夹到 100%。
+    expect(line([k('swarm', { remaining: 500 }), k('download', { remaining: 99 })])).toMatchObject({ meter: { kind: 'download' } })
+    // 全部不限。
+    expect(line([k('swarm', { unlimited: true }), k('download', { unlimited: true }), k('upload', { unlimited: true })])).toEqual({ kind: 'unlimited' })
   })
 })
 

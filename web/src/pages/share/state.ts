@@ -1,17 +1,17 @@
 // FluxMesh状态选择器：全部从 `AgentSnapshot.share` 派生（`shareChanged` 整段替换、`shareProgress` 按会话刷新）。
 
-import { CAPABILITY_AGENT_SHARE, useAgent, useRpcSelector } from '../../lib/rpc'
+import { CAPABILITY_AGENT_SHARE, rpcStore, useAgent, useRpcSelector } from '../../lib/rpc'
 import type {
   ShareDto,
   ShareLocalConfigDto,
   ShareNetStatusDto,
   SharePolicySummaryDto,
-  ShareReceiveRecordDto,
   ShareResolveDto,
   ShareStateDto,
   ShareTaskFactsDto,
 } from '../../lib/rpc'
 import type { RpcState } from '../../lib/rpc'
+import { PICKUP_CODE_LENGTH, pickupCodeLength } from './model'
 
 export const EMPTY_LOCAL_CONFIG: ShareLocalConfigDto = {
   udpPortV4: null,
@@ -115,9 +115,14 @@ export function useShareTaskFacts(taskId: string): ShareTaskFactsDto | undefined
   return useAgent((snapshot) => snapshot.share?.taskFacts[taskId], undefined)
 }
 
-const EMPTY_RECORDS: readonly ShareReceiveRecordDto[] = []
-export function useShareRecords(): readonly ShareReceiveRecordDto[] {
-  return useAgent((snapshot) => snapshot.share?.receiveRecords ?? EMPTY_RECORDS, EMPTY_RECORDS)
+/** 菜单在打开时构建，读一次最新事实即可。 */
+export function peekShareTaskFacts(taskId: string): ShareTaskFactsDto | undefined {
+  return rpcStore.peek().snapshot?.share?.taskFacts[taskId]
+}
+
+/** 云端下发的取件码位数（0 / 未下发按默认 6 位）；新建下载框据此识别取件码。 */
+export function usePickupCodeLength(): number {
+  return useAgent((snapshot) => pickupCodeLength(snapshot.share?.policySummary ?? EMPTY_POLICY), PICKUP_CODE_LENGTH)
 }
 
 /** 链接 / 深链打开后 agent 已解析、等待确认的接收预览。 */

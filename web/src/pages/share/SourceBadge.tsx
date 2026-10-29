@@ -41,7 +41,7 @@ export function SourceBadge({ taskId, taskState }: { taskId: string; taskState: 
   const t = useT()
   const facts = useShareTaskFacts(taskId)
   const navigate = useNavigate()
-  const badge = shareSourceBadge(facts)
+  const badge = shareSourceBadge(facts, taskState)
   if (!badge) return null
   return (
     <span className="flex shrink-0 items-center gap-1.5">
@@ -54,7 +54,7 @@ export function SourceBadge({ taskId, taskState }: { taskId: string; taskState: 
           className="shrink-0 whitespace-nowrap text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
           onClick={(event) => {
             event.stopPropagation()
-            void navigate({ to: '/share', search: { tab: 'usage' } })
+            void navigate({ to: '/settings/$category', params: { category: 'account' } })
           }}
         >
           {t(badge.swarmBlockKey)}

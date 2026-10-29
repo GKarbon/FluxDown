@@ -1,5 +1,5 @@
 // 分享面板（对应 GPUI 分享面板）：链接 + 「复制链接」主操作、6 位取件码 + 二维码、就地修改的 chip
-// （有效期 / 领取次数 / 领取通知）、本机网络状态行、每个接收方的连接行（路径、速率、进度、诊断）。
+// （有效期 / 领取次数 / 领取通知）、本机网络状态行、每个接收方的连接行（路径、速率、进度、诊断跳转）。
 // 打开即为任务创建分享（同一批任务已有有效分享则复用，改设置不新建）；窄屏为底部抽屉。
 
 import { useNavigate } from '@tanstack/react-router'
@@ -30,11 +30,11 @@ import {
 } from './model'
 import { CloudSection } from './CloudStorage'
 import { QrImage } from './QrImage'
-import { PathBadge, SessionDetailView } from './SessionDetail'
+import { PathBadge } from './SessionDetail'
 import { ShareSurface } from './ShareSurface'
 import { useShareById, useShareState, useShares } from './state'
 import type { SharePanelRequest } from './store'
-import { useShareDiagnostics } from './useShareDiagnostics'
+import { requestDiagnostics } from './diagnosticsRequest'
 
 /** 创建要先给文件算块哈希，大文件（NAS 机械盘上数十 GB）远超默认 30 秒超时。 */
 const CREATE_TIMEOUT_MS = 30 * 60_000
@@ -310,7 +310,7 @@ function ShareBody({ share, nowMs, onClose }: { share: ShareDto; nowMs: number; 
         ) : (
           <ul className="flex flex-col gap-2">
             {share.activeReceivers.map((receiver) => (
-              <ReceiverRow key={receiver.sessionId} receiver={receiver} />
+              <ReceiverRow key={receiver.sessionId} receiver={receiver} onClose={onClose} />
             ))}
           </ul>
         )}
@@ -339,12 +339,11 @@ function ShareBody({ share, nowMs, onClose }: { share: ShareDto; nowMs: number; 
   )
 }
 
-export function ReceiverRow({ receiver }: { receiver: ShareReceiverDto }) {
+/** 接收方行：「诊断此会话」关闭面板并跳到设置 › FluxMesh › 网络诊断，聚焦该会话（对齐 GPUI `open_diagnostics`）。 */
+export function ReceiverRow({ receiver, onClose }: { receiver: ShareReceiverDto; onClose: () => void }) {
   const t = useT()
-  const [open, setOpen] = useState(false)
+  const navigate = useNavigate()
   const [killing, setKilling] = useState(false)
-  const { data } = useShareDiagnostics({ sessionId: receiver.sessionId, enabled: open, intervalMs: 2000 })
-  const detail = data?.sessions.find((session) => session.sessionId === receiver.sessionId)
   const name = receiver.deviceName.trim()
   const percent = progressPercent(receiver.progress)
 
@@ -375,7 +374,15 @@ export function ReceiverRow({ receiver }: { receiver: ShareReceiverDto }) {
           {rateLabel(receiver.rateBps)} · {formatBytes(receiver.bytes)}
         </span>
         <span className="ml-auto flex gap-1">
-          <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setOpen((value) => !value)}>
+          <Button
+            variant="ghost"
+            className="h-7 px-2 text-xs"
+            onClick={() => {
+              requestDiagnostics(receiver.sessionId)
+              onClose()
+              void navigate({ to: '/settings/$category', params: { category: 'share' } })
+            }}
+          >
             {t('shareDiagnose')}
           </Button>
           <Button variant="ghost" className="h-7 px-2 text-xs text-destructive" loading={killing} onClick={() => void kill()}>
@@ -383,7 +390,6 @@ export function ReceiverRow({ receiver }: { receiver: ShareReceiverDto }) {
           </Button>
         </span>
       </div>
-      {open ? detail ? <SessionDetailView detail={detail} /> : <Spinner size="md" className="mx-auto my-2" /> : null}
     </li>
   )
 }

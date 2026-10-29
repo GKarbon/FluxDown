@@ -20,6 +20,7 @@ import {
   RotateCw,
   Rows3,
   Share2,
+  Square,
   ShieldCheck,
   Trash2,
   Zap,
@@ -65,7 +66,7 @@ import type { DownloadTaskView } from '../model/task'
 import { anyActive, anyResumable } from '../model/groupTree'
 import type { GroupCounts } from '../model/groupTree'
 import { openChangeSegments, openChangeUrl, openGroupDetail, openRename } from '../dialogs'
-import { openSharePanel, peekSendState } from '../../share'
+import { openSharePanel, peekSendState, peekShareTaskFacts, providingRecordId, stopProviding } from '../../share'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -189,6 +190,11 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
       ...(shareState === 'ok' ? {} : { description: t(shareState) }),
       onSelect: () => openSharePanel(views.map((view) => view.taskId)),
     })
+  }
+  // 停止共享：单选且该接收任务的记录仍在共享（含已完成回传中的任务）。
+  const providingId = only ? providingRecordId(peekShareTaskFacts(only.taskId)) : null
+  if (providingId) {
+    entries.push({ type: 'item', key: 'stop-providing', label: t('shareStopProviding'), icon: Square, onSelect: () => void stopProviding(providingId, t) })
   }
   if (only && canRename(only)) {
     entries.push({ type: 'item', key: 'rename', label: t('renameTask'), icon: Pen, onSelect: () => openRename(only.taskId) })

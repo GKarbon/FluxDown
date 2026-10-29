@@ -38,8 +38,8 @@ import { SaveDirCombo } from './SaveDirCombo'
 import { CategoryPicker } from './CategoryPicker'
 import { SAVE_DIR_HISTORY_ENABLED_PREF, SAVE_DIR_HISTORY_PREF, readSaveDirHistory, recordSaveDir, saveDirChoices } from '../../../lib/saveDirHistory'
 import { accountErrorKey } from '../../settings/sections/account/errorText'
-import { extractShareLinks, parseShareLink, removeShareLink, shareNoticeKey } from '../../share/model'
-import { useShareAvailable } from '../../share/state'
+import { extractShareItems, isPickupCodeItem, parseShareLink, removeShareItem, shareNoticeKey } from '../../share/model'
+import { usePickupCodeLength, useShareAvailable } from '../../share/state'
 import { openShareReceive } from '../../share/store'
 import { buildRemoteTargets, checkRemoteSaveDir, dispatchRoute, LOCAL_TARGET, linkDispatchParams, pathExample, remoteDispatchParams, resolveTargetValue, summarizeDispatch } from './target'
 import type { RemoteTarget } from './target'
@@ -144,7 +144,10 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
 
   const shareAvailable = useShareAvailable()
   const shareActive = shareAvailable && target === null
-  const shareLinks = useMemo(() => extractShareLinks(text), [text])
+  const pickupLength = usePickupCodeLength()
+  // 待接收项 = 分享链接 + 取件码（逐行识别、按值去重）：不进下载条目，交给接收确认。
+  const shareItems = useMemo(() => extractShareItems(text, pickupLength), [text, pickupLength])
+  const hasShareInput = shareItems.length > 0
   const parsed = useMemo(() => parseInput(text, false), [text])
   // FluxMesh可用时分享链接（含 `https://…/s/<slug>` 形式）不当作普通下载链接。
   const entries = useMemo(
@@ -178,16 +181,16 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
   const allMagnet = count > 0 && entries.every((entry) => isMagnetUrl(entry.url))
   const busy = phase !== 'idle' || busyFiles
   const remoteDirCheck = target ? checkRemoteSaveDir(remoteSaveDir, target.pathStyle) : 'ok'
-  const canSubmit = !busy && (count > 0 ? (target ? remoteDirCheck === 'ok' : saveDir.trim() !== '') : shareActive && shareLinks.length > 0)
-  const shareNotice = shareNoticeKey(shareLinks.length, count, shareAvailable && target === null)
+  const canSubmit = !busy && (count > 0 ? (target ? remoteDirCheck === 'ok' : saveDir.trim() !== '') : shareActive && hasShareInput)
+  const shareNotice = shareNoticeKey(count, shareItems.length, shareItems.filter(isPickupCodeItem).length, shareAvailable && target === null)
 
-  /** 把第一条分享链接交给接收确认框并从输入里拿走；输入已空（无其它链接、无更多分享链接）时关闭本对话框。 */
+  /** 把第一个待接收项（分享链接或取件码）交给接收确认框并从输入里拿走；输入已空（无其它条目、无更多待接收项）时关闭本对话框。 */
   const receiveShare = () => {
-    const first = shareLinks[0]
-    if (!first) return
-    openShareReceive(first.link)
-    const rest = removeShareLink(text, first.link)
-    if (count === 0 && extractShareLinks(rest).length === 0) closeNewDownload()
+    const first = shareItems[0]
+    if (first === undefined) return
+    openShareReceive(first)
+    const rest = removeShareItem(text, first, pickupLength)
+    if (count === 0 && extractShareItems(rest, pickupLength).length === 0) closeNewDownload()
     else setText(rest)
   }
 
@@ -412,7 +415,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
   const submit = async (later: boolean, queueOverride?: string) => {
     if (!canSubmit) return
     // 分享链接走接收确认框（永不直接建任务）；其余链接照常下载。
-    if (shareActive && shareLinks.length > 0) {
+    if (shareActive && hasShareInput) {
       receiveShare()
       if (count === 0) return
     }
@@ -760,11 +763,11 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
               }}
               className="font-mono text-xs"
             />
-            {text.trim() !== '' && count === 0 && shareLinks.length === 0 ? <FieldError>{t('newDownloadNoValidUrl')}</FieldError> : null}
+            {text.trim() !== '' && count === 0 && !hasShareInput ? <FieldError>{t('newDownloadNoValidUrl')}</FieldError> : null}
             {shareNotice ? (
               <div className="flex items-start gap-2 rounded-md border border-hairline bg-chrome px-2.5 py-2 text-xs text-muted-foreground">
                 <Icon icon={Share2} className="mt-0.5 shrink-0 text-text-tertiary" />
-                <span className="min-w-0 flex-1">{t(shareNotice, { count: shareLinks.length })}</span>
+                <span className="min-w-0 flex-1">{t(shareNotice, { count: shareItems.length })}</span>
                 {shareActive ? (
                   <Button variant="outline" disabled={busy} onClick={receiveShare}>
                     {t('shareReceive')}

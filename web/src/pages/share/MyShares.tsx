@@ -1,9 +1,10 @@
-// 「我的分享」：文件、方式、有效期、领取次数、最近访问、状态；复制链接、二维码 / 详情（分享面板）、停止 / 开始 / 删除。
-// 支持多选批量开始 / 停止 / 删除（逐项调用单项 RPC，汇总失败）。桌面为表格，窄屏为卡片。
+// 「我的分享」：文件（副行 文件数 · 大小 · 到期）、领取次数、状态；行内只留 复制链接 / 二维码 / 停止或删除，
+// 云端暂存、申诉、重新开始分享收进「更多操作」菜单。支持多选批量开始 / 停止 / 删除（逐项调用单项 RPC，汇总失败）。桌面为表格，窄屏为卡片。
 
 import {
   Copy,
   Gavel,
+  MoreHorizontal,
   Play,
   QrCode,
   Share2,
@@ -17,6 +18,7 @@ import { copyText } from "../../lib/copy";
 import { rpc } from "../../lib/rpc";
 import type { ShareDto } from "../../lib/rpc";
 import {
+  ActionMenu,
   Badge,
   Button,
   Checkbox,
@@ -26,27 +28,27 @@ import {
   toast,
   useIsMobile,
 } from "../../ui";
+import type { MenuEntry } from "../../ui";
 import { accountErrorText } from "../settings/sections/account/errorText";
-import { formatBytes } from "../downloads/dialogs/utils";
 import { useNowSeconds } from "../rss/useNow";
 import {
   SHARE_STATUS_KEYS,
   appealState,
   shareActionApplies,
-  agoLabel,
   canStartShare,
   canStopShare,
-  dateTimeLabel,
   isSourceMissing,
   planShareBatch,
   pruneSelection,
   selectAllState,
   shareDisplayStatus,
+  shareMetaLine,
   shareTitleText,
   sortShares,
 } from "./model";
 import type { ShareDisplayStatus } from "./model";
-import { CloudRowActions, CloudStateBadge } from "./CloudStorage";
+import { CloudStateBadge } from "./CloudStorage";
+import { useCloudMenuEntries } from "./cloudActions";
 import { AppealDialog } from "./AppealDialog";
 import { useShares } from "./state";
 import { openShareDetail } from "./store";
@@ -166,7 +168,7 @@ export function MyShares() {
     <div className="flex min-w-0 flex-col gap-2">
       {bar}
       <div className="min-w-0 overflow-x-auto rounded-md border border-hairline">
-        <table className="w-full min-w-[900px] text-left text-sm">
+        <table className="w-full min-w-[640px] text-left text-sm">
           <thead className="bg-chrome text-xs text-text-tertiary">
             <tr className="group/head">
               <th className="w-9 px-2 py-2 font-normal">
@@ -185,12 +187,7 @@ export function MyShares() {
                 </div>
               </th>
               <th className="px-3 py-2 font-normal">{t("shareColFile")}</th>
-              <th className="px-3 py-2 font-normal">{t("shareColMethod")}</th>
-              <th className="px-3 py-2 font-normal">{t("shareColExpiry")}</th>
               <th className="px-3 py-2 font-normal">{t("shareColClaims")}</th>
-              <th className="px-3 py-2 font-normal">
-                {t("shareColLastAccess")}
-              </th>
               <th className="px-3 py-2 font-normal">{t("shareColStatus")}</th>
               <th className="px-3 py-2" />
             </tr>
@@ -308,7 +305,7 @@ function StatusBadges({
   );
 }
 
-/** 复制 / 二维码 + 停止（有效）或 开始 / 删除（已停止 / 已过期）行内操作。 */
+/** 行内：复制 / 二维码 + 停止（有效）或 删除（已停止 / 已过期）；云端暂存 / 申诉 / 重新开始进「更多操作」。 */
 function ShareActions({
   share,
   status,
@@ -321,6 +318,7 @@ function ShareActions({
   const t = useT();
   const [pending, setPending] = useState<ShareOp | null>(null);
   const [appealing, setAppealing] = useState(false);
+  const cloud = useCloudMenuEntries(share, nowMs);
   const appeal = appealState(share);
   const live = status === "active";
   const ended = !live && !canStopShare(share);
@@ -346,7 +344,39 @@ function ShareActions({
   };
 
   const startable = canStartShare(share);
-  const canStart = shareActionApplies("start", share);
+  const more: MenuEntry[] = [...cloud.entries];
+  if (ended && shareActionApplies("start", share)) {
+    more.push({
+      type: "item",
+      key: "start",
+      label: t("shareActionStart"),
+      icon: Play,
+      disabled: !startable || pending !== null,
+      ...(startable ? {} : { description: t("shareStartDisabledMissing") }),
+      onSelect: () => void run("start"),
+    });
+  }
+  if (appeal === "canAppeal") {
+    more.push({
+      type: "item",
+      key: "appeal",
+      label: t("shareAppeal"),
+      icon: Gavel,
+      onSelect: () => setAppealing(true),
+    });
+  } else if (appeal === "pending" || appeal === "rejected") {
+    more.push({
+      type: "item",
+      key: "appeal-status",
+      label: t(
+        appeal === "pending" ? "shareAppealPending" : "shareAppealRejected",
+      ),
+      icon: Gavel,
+      disabled: true,
+      onSelect: () => undefined,
+    });
+  }
+
   return (
     <div className="flex shrink-0 items-center justify-end gap-0.5">
       <Tooltip content={t("shareCopyLink")}>
@@ -373,7 +403,6 @@ function ShareActions({
           <QrCode className="size-4" />
         </Button>
       </Tooltip>
-      <CloudRowActions share={share} nowMs={nowMs} />
       {live ? (
         <Tooltip content={t("shareStop")}>
           <Button
@@ -389,63 +418,36 @@ function ShareActions({
         </Tooltip>
       ) : null}
       {ended ? (
-        <>
-          {canStart ? (
-            <Tooltip
-              content={
-                startable
-                  ? t("shareActionStart")
-                  : t("shareStartDisabledMissing")
-              }
-            >
-              {/* 禁用的按钮不触发悬停，tooltip 挂在外层 span 上。 */}
-              <span className="inline-flex">
-                <Button
-                  variant="ghost"
-                  iconOnly
-                  aria-label={t("shareActionStart")}
-                  disabled={!startable || pending !== null}
-                  loading={pending === "start"}
-                  onClick={() => void run("start")}
-                >
-                  <Play className="size-4" />
-                </Button>
-              </span>
-            </Tooltip>
-          ) : null}
-          <Tooltip content={t("shareActionDelete")}>
-            <Button
-              variant="ghost"
-              iconOnly
-              aria-label={t("shareActionDelete")}
-              className="text-destructive"
-              disabled={pending !== null}
-              loading={pending === "delete"}
-              onClick={() => void run("delete")}
-            >
-              <Trash2 className="size-4" />
-            </Button>
-          </Tooltip>
-        </>
-      ) : null}
-      {appeal === "canAppeal" ? (
-        <Tooltip content={t("shareAppeal")}>
+        <Tooltip content={t("shareActionDelete")}>
           <Button
             variant="ghost"
             iconOnly
-            aria-label={t("shareAppeal")}
-            onClick={() => setAppealing(true)}
+            aria-label={t("shareActionDelete")}
+            className="text-destructive"
+            disabled={pending !== null}
+            loading={pending === "delete"}
+            onClick={() => void run("delete")}
           >
-            <Gavel className="size-4" />
+            <Trash2 className="size-4" />
           </Button>
         </Tooltip>
       ) : null}
-      {appeal === "pending" || appeal === "rejected" ? (
-        <span className="px-1 text-xs text-text-tertiary">
-          {t(
-            appeal === "pending" ? "shareAppealPending" : "shareAppealRejected",
-          )}
-        </span>
+      {more.length > 0 ? (
+        <ActionMenu
+          title={t("moreActions")}
+          entries={more}
+          trigger={
+            <Button
+              variant="ghost"
+              iconOnly
+              aria-label={t("moreActions")}
+              title={t("moreActions")}
+              loading={cloud.busy}
+            >
+              <MoreHorizontal className="size-4" />
+            </Button>
+          }
+        />
       ) : null}
       {appealing ? (
         <AppealDialog shareId={share.id} onClose={() => setAppealing(false)} />
@@ -486,28 +488,16 @@ function ShareTableRow({
           />
         </div>
       </td>
-      <td className="max-w-[320px] px-3 py-2">
+      <td className="max-w-[360px] px-3 py-2">
         <div className="truncate text-foreground" title={share.title}>
           {shareTitleText(t, share)}
         </div>
-        <div className="tabular text-xs text-text-tertiary">
-          {t("shareFilesCount", { count: share.files.length })} ·{" "}
-          {formatBytes(share.totalBytes)}
+        <div className="tabular truncate text-xs text-text-tertiary">
+          {shareMetaLine(t, share)}
         </div>
-      </td>
-      <td className="px-3 py-2 text-xs text-muted-foreground">
-        {t(share.mode === "cloud" ? "shareModeCloud" : "shareModeLive")}
-      </td>
-      <td className="tabular px-3 py-2 text-xs text-muted-foreground">
-        {dateTimeLabel(share.expiresAt)}
       </td>
       <td className="tabular px-3 py-2 text-xs text-muted-foreground">
         {claimsText(t, share)}
-      </td>
-      <td className="px-3 py-2 text-xs text-muted-foreground">
-        {share.lastAccessedAt === null
-          ? t("shareNever")
-          : agoLabel(t, share.lastAccessedAt, nowMs)}
       </td>
       <td className="px-3 py-2">
         <div className="flex flex-wrap items-center gap-1">
@@ -552,28 +542,15 @@ function ShareCard({
             {shareTitleText(t, share)}
           </div>
           <div className="tabular text-xs text-text-tertiary">
-            {t("shareFilesCount", { count: share.files.length })} ·{" "}
-            {formatBytes(share.totalBytes)}
+            {shareMetaLine(t, share)}
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
           <StatusBadges share={share} status={status} />
         </div>
       </div>
-      <div className="tabular flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-        <span>
-          {t(share.mode === "cloud" ? "shareModeCloud" : "shareModeLive")}
-        </span>
-        <span>
-          {t("shareExpiresAt", { time: dateTimeLabel(share.expiresAt) })}
-        </span>
-        <span>{claimsText(t, share)}</span>
-        <span>
-          {t("shareColLastAccess")}:{" "}
-          {share.lastAccessedAt === null
-            ? t("shareNever")
-            : agoLabel(t, share.lastAccessedAt, nowMs)}
-        </span>
+      <div className="tabular text-xs text-muted-foreground">
+        {claimsText(t, share)}
       </div>
       <ShareActions share={share} status={status} nowMs={nowMs} />
     </li>
