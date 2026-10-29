@@ -7,7 +7,7 @@ let configured = true;
 let cdnConfigured = true;
 const MAINLAND_IP = "114.114.114.114";
 const MAINLAND_IPV6 = "2408:8207:78ae:7a51:f55e:4f2f:261d:ccc9";
-/** 反代按 Cloudflare 的 CF-IPCountry 写入的 X-Client-Country。 */
+/** 反代按边缘国家码（ESA Ali-Ip-Country / CF-IPCountry）写入的 X-Client-Country。 */
 const COUNTRY: Record<string, string> = {
   [MAINLAND_IP]: "CN", [MAINLAND_IPV6]: "CN", "8.8.8.8": "US", "1.1.1.1": "HK",
 };
@@ -91,7 +91,7 @@ async function get(source = "", tag = `v${sequence}`, filename = "app.zip", clie
   return GET({ params: { filename }, url, request, clientAddress: "10.0.0.1" } as Parameters<typeof GET>[0]);
 }
 
-test("mainland is Cloudflare's country code, so IPv6 visitors count and HK / unknown do not", async () => {
+test("mainland is the edge's country code, so IPv6 visitors count and HK / unknown do not", async () => {
   for (const [ip, expected] of [[MAINLAND_IPV6, "cdn"], ["1.1.1.1", "github"], ["10.9.9.9", "github"]]) {
     markReleaseViewer(ip);
     const response = await get("auto", `v${sequence}`, "app.zip", ip, "Mozilla/5.0");

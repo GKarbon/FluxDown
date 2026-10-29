@@ -201,7 +201,7 @@ export default defineConfig({
 
       // ── 可选：阿里云 OSS 发布资产 + dl-cn 下载镜像（/api/download，见 src/lib/oss.ts）──
       // 对象布局 `<OSS_RELEASE_PREFIX>/<tag>/<file>`，与 .github/actions/oss-upload 一致。
-      // bucket 私有：官网用 AK/SK 只做 HEAD 存在性探测；中国大陆访客（Cloudflare 国家码，client-ip.ts）与 source=oss
+      // bucket 私有：官网用 AK/SK 只做 HEAD 存在性探测；中国大陆访客（ESA 国家码，client-ip.ts）与 source=oss
       // 302 到 CN_CDN_BASE（URL 鉴权 A），其余访客走 GitHub。AK/SK 或 CN_CDN_AUTH_KEY 缺失时全部走 GitHub。
       OSS_ACCESS_KEY_ID: envField.string({
         context: "server",
@@ -228,8 +228,8 @@ export default defineConfig({
         access: "secret",
         default: "FluxDownRelease",
       }),
-      // dl-cn 下载镜像：现为 Cloudflare Worker（website-v2/cdn/oss-proxy.js，私有 OSS 回源），ICP 备案后
-      // 改回阿里云 CDN；两者都按「URL 鉴权 A 方式」校验 CN_CDN_AUTH_KEY，缺省则镜像关闭。
+      // dl-cn 下载镜像：阿里云 ESA 边缘函数（website-v2/cdn/esa-dl-cn.js，私有 OSS 回源），
+      // 按「URL 鉴权 A 方式」校验 CN_CDN_AUTH_KEY，缺省则镜像关闭。
       CN_CDN_BASE: envField.string({
         context: "server",
         access: "secret",
