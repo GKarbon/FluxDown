@@ -70,7 +70,7 @@ impl Inner {
                 dto
             })
             .collect();
-        let task_facts = self
+        let mut task_facts: std::collections::BTreeMap<String, ShareTaskFactsDto> = self
             .receive_tasks
             .iter()
             .map(|(task_id, task)| {
@@ -113,10 +113,41 @@ impl Inner {
                         && session.is_some_and(|(_, m)| m.relay_stuck && !m.ended),
                     swarm_peers,
                     swarm_block: self.swarm_blocks.get(&task.share_id).copied(),
+                    record_id: Some(task.record_id.clone()),
+                    sender_device_name: self
+                        .records
+                        .iter()
+                        .find(|r| r.id == task.record_id)
+                        .map(|r| r.sender_device_name.clone())
+                        .unwrap_or_default(),
+                    provide_state: self.provide_state_of(&task.record_id),
                 };
                 (task_id.clone(), facts)
             })
             .collect();
+        // 已完成后被移除的接收任务：只要其记录仍在共享就保留 facts（遍历全部记录，共享中的数量有界）。
+        for record in &self.records {
+            if self.provide_state_of(&record.id) != fluxdown_protocol::ShareProvideState::Providing
+            {
+                continue;
+            }
+            for task_id in &record.task_ids {
+                if task_facts.contains_key(task_id) {
+                    continue;
+                }
+                task_facts.insert(
+                    task_id.clone(),
+                    ShareTaskFactsDto {
+                        is_share_receive: true,
+                        share_id: record.share_id.clone(),
+                        record_id: Some(record.id.clone()),
+                        sender_device_name: record.sender_device_name.clone(),
+                        provide_state: fluxdown_protocol::ShareProvideState::Providing,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
         let receive_records = self
             .records
             .iter()

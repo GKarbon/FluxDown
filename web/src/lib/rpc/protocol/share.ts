@@ -195,6 +195,12 @@ export interface ShareTaskFactsDto {
   swarmPeers?: number;
   /** 共享加速被云端拒绝的原因；null / 缺省 = 未被拒绝。 */
   swarmBlock?: ShareSwarmBlock | null;
+  /** 所属接收记录 ID（`agent.share.stopProviding` / 举报的定位键）；旧载荷缺省视为 `null`。 */
+  recordId?: string | null;
+  /** 分享方设备名；未知为空串，旧载荷缺省视为空串。 */
+  senderDeviceName?: string;
+  /** 所属接收记录的共享状态；旧载荷缺省视为 `off`。已完成任务仅在 `providing` 时保留 facts。 */
+  provideState?: ShareProvideState;
 }
 
 /** 创建分享时正在做块哈希的任务（`agent.share.create` 返回前出现，完成后移除）。 */

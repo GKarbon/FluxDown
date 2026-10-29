@@ -81,12 +81,16 @@ impl Inner {
     /// 把共享状态叠加到接收记录上（持久化的记录本身不带它）。
     pub(super) fn record_dto(&self, record: &ShareReceiveRecordDto) -> ShareReceiveRecordDto {
         let mut dto = record.clone();
-        dto.provide_state = self
-            .provides
-            .iter()
-            .find(|s| s.record_id == record.id)
-            .map_or(ShareProvideState::Off, |s| s.state);
+        dto.provide_state = self.provide_state_of(&record.id);
         dto
+    }
+
+    /// 接收记录的共享状态（`record_dto` 与任务事实共用）。
+    pub(super) fn provide_state_of(&self, record_id: &str) -> ShareProvideState {
+        self.provides
+            .iter()
+            .find(|s| s.record_id == record_id)
+            .map_or(ShareProvideState::Off, |s| s.state)
     }
 
     fn is_providing(&self, record_id: &str) -> bool {

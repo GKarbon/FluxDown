@@ -565,8 +565,9 @@ pub struct ShareHomeRelayDto {
     pub connected: bool,
 }
 
-/// 一个下载任务上的FluxMesh事实（任务行来源徽标 / 「切换桥接」 / 传输诊断页的入口）。
-/// 只有FluxMesh接收任务（`isShareReceive`）才有条目；键为 daemon 任务 ID。
+/// 一个下载任务上的FluxMesh事实（任务行来源徽标 / 「切换桥接」 / 「停止共享」 / 传输诊断页的入口）。
+/// 只有FluxMesh接收任务（`isShareReceive`）才有条目；键为 daemon 任务 ID。进行中的接收任务都有；
+/// 已完成的只在其接收记录仍在共享（`provideState = providing`）时保留。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -593,6 +594,15 @@ pub struct ShareTaskFactsDto {
     /// 共享加速被云端拒绝的原因（查找成功后清空）；任务仍从分享方直连继续。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm_block: Option<ShareSwarmBlock>,
+    /// 所属接收记录 ID（`agent.share.stopProviding` / 举报的定位键）；旧载荷缺省为 `None`。
+    #[serde(default)]
+    pub record_id: Option<String>,
+    /// 分享方设备名；未知为空串。
+    #[serde(default)]
+    pub sender_device_name: String,
+    /// 所属接收记录的共享（共享提供）状态。
+    #[serde(default)]
+    pub provide_state: ShareProvideState,
 }
 
 /// 创建分享时正在做块哈希的任务，`agent.share.create` 返回前出现，完成后移除。

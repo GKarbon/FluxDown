@@ -215,6 +215,17 @@ async fn stop_providing_withdraws_and_releases_the_endpoint() {
     let pair = receive_and_complete("stop", 5 * MIB, true).await;
     wait_until("B announced as a complete holder", || b_registered(&pair)).await;
     wait_until("B content offered", || !pair.b.service.content.is_empty()).await;
+    // 接收完成后任务已移除，但共享中的记录仍保留其任务事实。
+    let facts = pair.b.service.with(|i| i.state_dto(false).task_facts);
+    let kept: Vec<_> = facts
+        .values()
+        .filter(|f| f.record_id.as_deref() == Some(pair.record_id.as_str()))
+        .collect();
+    assert!(!kept.is_empty(), "providing record keeps task facts");
+    assert!(
+        kept.iter()
+            .all(|f| f.is_share_receive && f.provide_state == ShareProvideState::Providing)
+    );
 
     let record: ShareReceiveRecordDto = call(
         &pair.b,
@@ -224,6 +235,14 @@ async fn stop_providing_withdraws_and_releases_the_endpoint() {
     .await
     .unwrap();
     assert_eq!(record.provide_state, ShareProvideState::Stopped);
+    // 任务事实随共享一起消失。
+    let facts = pair.b.service.with(|i| i.state_dto(false).task_facts);
+    assert!(
+        facts
+            .values()
+            .all(|f| f.record_id.as_deref() != Some(pair.record_id.as_str())),
+        "stopped provide must not keep task facts: {facts:?}"
+    );
     assert!(pair.b.service.content.is_empty());
 
     // 云端收到撤销，登记行消失；B 没有任何理由保持端点。
