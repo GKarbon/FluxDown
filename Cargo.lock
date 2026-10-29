@@ -3897,6 +3897,7 @@ dependencies = [
  "fluxdown_ui_components",
  "fluxdown_ui_i18n",
  "fluxdown_ui_theme",
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "serde",

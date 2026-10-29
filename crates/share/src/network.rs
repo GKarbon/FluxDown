@@ -19,9 +19,10 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
     FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, relative, uniform_list,
+    SharedString, StatefulInteractiveElement as _, Styled as _, UniformList,
+    UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, relative, uniform_list,
 };
+use gpui_base::ScrollBounce;
 use gpui_component::{
     Disableable as _, Icon, WindowExt as _,
     button::Button,
@@ -64,8 +65,8 @@ const LOG_DEBOUNCE_MS: u64 = 400;
 const METRIC_ROWS_VISIBLE: usize = 12;
 const LOG_ROWS_VISIBLE: usize = 14;
 const JSON_ROWS_VISIBLE: usize = 16;
-/// 日志行各列宽（默认字号下的 px）。
-const LOG_TIME_WIDTH: f32 = 84.;
+/// 日志行各列宽（默认字号下的 px）。时间列放得下 `HH:MM:SS.mmm` 12 个等宽字符且留余量。
+const LOG_TIME_WIDTH: f32 = 100.;
 const LOG_LEVEL_WIDTH: f32 = 44.;
 const LOG_TARGET_WIDTH: f32 = 180.;
 /// 过滤输入框宽度（默认字号下的 px）。
@@ -115,6 +116,10 @@ pub(crate) struct NetworkTab {
     metrics_placeholder: SharedString,
     sessions: SessionExpansion,
     logs: LogsState,
+    /// 页内三个定高列表各自的滚动位置（与页面滚动相互独立）。
+    metrics_scroll: UniformListScrollHandle,
+    logs_scroll: UniformListScrollHandle,
+    snapshot_scroll: UniformListScrollHandle,
 }
 
 impl NetworkTab {
@@ -172,6 +177,9 @@ impl NetworkTab {
                 debounce: Debounce::default(),
                 request: 0,
             },
+            metrics_scroll: UniformListScrollHandle::new(),
+            logs_scroll: UniformListScrollHandle::new(),
+            snapshot_scroll: UniformListScrollHandle::new(),
         }
     }
 
@@ -375,6 +383,29 @@ fn row_height(cx: &App) -> Pixels {
 
 fn list_height(count: usize, max_rows: usize, cx: &App) -> Pixels {
     row_height(cx) * count.min(max_rows) as f32
+}
+
+/// 页内定高列表：自带滚动条，并经 `ScrollBounce` 认领指针下的滚轮。
+///
+/// 整页是 `overflow_y_scrollbar`，它在捕获阶段认领滚轮并截停；裸 `uniform_list` 只在冒泡阶段滚动，
+/// 于是永远收不到事件。内容溢出时这里认领，列表与页面各自滚动；不溢出时不认领，滚轮照常交给页面。
+fn nested_list(
+    id: &'static str,
+    handle: &UniformListScrollHandle,
+    list: UniformList,
+    height: Pixels,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .relative()
+        .w_full()
+        .h(height)
+        .child(ScrollBounce::new(
+            SharedString::from(format!("{id}-bounce")),
+            handle,
+            list.track_scroll(handle).size_full(),
+        ))
+        .vertical_scrollbar(handle)
 }
 
 fn health_color(health: NetHealth, cx: &App) -> Hsla {
@@ -1023,7 +1054,9 @@ impl NetworkTab {
                                 .child(text(translator, "shareNetMetricValue")),
                         ),
                 )
-                .child(
+                .child(nested_list(
+                    "share-net-metrics-area",
+                    &self.metrics_scroll,
                     uniform_list(
                         "share-net-metrics",
                         shown,
@@ -1055,10 +1088,9 @@ impl NetworkTab {
                                 })
                                 .collect::<Vec<_>>()
                         }),
-                    )
-                    .w_full()
-                    .h(list_height(shown, METRIC_ROWS_VISIBLE, cx)),
-                )
+                    ),
+                    list_height(shown, METRIC_ROWS_VISIBLE, cx),
+                ))
         };
         self.section(header, body, cx)
     }
@@ -1173,7 +1205,9 @@ impl NetworkTab {
             .child(if count == 0 {
                 v_flex().child(meta_text(cx).child(text(translator, "shareLogsEmpty")))
             } else {
-                v_flex().w_full().child(
+                v_flex().w_full().child(nested_list(
+                    "share-net-logs-area",
+                    &self.logs_scroll,
                     uniform_list(
                         "share-net-logs",
                         count,
@@ -1202,6 +1236,8 @@ impl NetworkTab {
                                             mono_text(cx)
                                                 .w(theme.text_extent(LOG_TIME_WIDTH))
                                                 .flex_none()
+                                                .whitespace_nowrap()
+                                                .font_features(tabular_numbers())
                                                 .text_color(theme.extended().colors.text_tertiary)
                                                 .child(row.time.clone()),
                                         )
@@ -1209,6 +1245,7 @@ impl NetworkTab {
                                             mono_text(cx)
                                                 .w(theme.text_extent(LOG_LEVEL_WIDTH))
                                                 .flex_none()
+                                                .whitespace_nowrap()
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(level_color(row.level, cx))
                                                 .child(log_level_tag(row.level)),
@@ -1231,10 +1268,9 @@ impl NetworkTab {
                                 })
                                 .collect::<Vec<_>>()
                         }),
-                    )
-                    .w_full()
-                    .h(list_height(count, LOG_ROWS_VISIBLE, cx)),
-                )
+                    ),
+                    list_height(count, LOG_ROWS_VISIBLE, cx),
+                ))
             });
         self.section(header, body, cx)
     }
@@ -1263,7 +1299,9 @@ impl NetworkTab {
             .rounded(theme.tokens().radius.md)
             .bg(theme.tokens().colors.muted)
             .px(theme.tokens().spacing.sm)
-            .child(
+            .child(nested_list(
+                "share-net-snapshot-area",
+                &self.snapshot_scroll,
                 uniform_list(
                     "share-net-snapshot",
                     lines,
@@ -1281,10 +1319,9 @@ impl NetworkTab {
                             })
                             .collect::<Vec<_>>()
                     }),
-                )
-                .w_full()
-                .h(list_height(lines, JSON_ROWS_VISIBLE, cx)),
-            );
+                ),
+                list_height(lines, JSON_ROWS_VISIBLE, cx),
+            ));
         self.section(header, body, cx)
     }
 }
