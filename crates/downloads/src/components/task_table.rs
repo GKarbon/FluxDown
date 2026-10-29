@@ -13,7 +13,7 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Edges, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Stateful,
+    ParentElement, Pixels, Render, ScrollEvent, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Task, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -1858,7 +1858,7 @@ impl DownloadTableDelegate {
         self.selection_anchor = Some(key);
     }
 
-    pub(crate) fn select_task(&mut self, key: RowKey, modifiers: Modifiers) {
+    pub(crate) fn select_task(&mut self, key: RowKey, modifiers: SelectModifiers) {
         // 正在删除的任务不参与选择。
         if self.is_pending_delete(&key) {
             return;
@@ -1888,7 +1888,7 @@ impl DownloadTableDelegate {
             }
         }
 
-        if modifiers.secondary() {
+        if modifiers.toggle {
             if !self.selected_tasks.remove(&key) {
                 self.selected_tasks.insert(key.clone());
             }
@@ -3367,7 +3367,7 @@ impl TableDelegate for DownloadTableDelegate {
             let key = key.clone();
             move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
                 let modifiers = event.modifiers();
-                if event.click_count() != 2 || modifiers.secondary() || modifiers.shift {
+                if event.click_count() != 2 || modifiers.secondary(cx) || modifiers.shift {
                     return;
                 }
                 let key = key.clone();
@@ -3404,9 +3404,10 @@ impl TableDelegate for DownloadTableDelegate {
                     }),
             )
             .on_click(cx.listener(move |table, event: &ClickEvent, _, cx| {
-                table
-                    .delegate_mut()
-                    .select_task(key.clone(), event.modifiers());
+                table.delegate_mut().select_task(
+                    key.clone(),
+                    SelectModifiers::from_event(event.modifiers(), cx),
+                );
                 cx.notify();
             }))
             .when_some(activate, |this, activate| this.on_click(activate))
@@ -3557,6 +3558,23 @@ impl TableDelegate for DownloadTableDelegate {
                 self.task_context_menu(menu, active_theme(cx).tokens().colors.destructive)
             }
             Some(VisibleRow::GroupDir { .. } | VisibleRow::GroupHeader { .. }) | None => menu,
+        }
+    }
+}
+
+/// 单击选择时的修饰键语义：`toggle` = 平台次要键（macOS Cmd / 其他 Ctrl，运行期按 `App` 判定），
+/// 把单行 / 整组并入或移出选区；`shift` = 从锚点连选。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SelectModifiers {
+    pub(crate) shift: bool,
+    pub(crate) toggle: bool,
+}
+
+impl SelectModifiers {
+    pub(crate) fn from_event(modifiers: Modifiers, cx: &App) -> Self {
+        Self {
+            shift: modifiers.shift,
+            toggle: modifiers.secondary(cx),
         }
     }
 }
@@ -3827,7 +3845,7 @@ pub(crate) fn render_download_table(
         .overflow_hidden()
         .bg(active_theme(cx).tokens().colors.surface)
         .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state, cx))
-        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state, cx))
+        .on_scroll(note_pointer::<ScrollEvent>(table_state, cx))
         .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state, cx))
         .capture_any_mouse_down(clear_context_row_on_left_press(table_state))
         .child(
@@ -4205,12 +4223,11 @@ mod tests {
     };
 
     use fluxdown_ui_i18n::{I18nCatalog, I18nError};
-    use gpui::Modifiers;
 
     use super::{
-        DownloadColumnKind, DownloadTableDelegate, DownloadsCommand, RowAction, SelectionSummary,
-        TableFilter, ToolbarCommand, VisibleRow, group_by_key, is_seeding_row, percent_label,
-        row_actions, seeding_upload_speed, task_command,
+        DownloadColumnKind, DownloadTableDelegate, DownloadsCommand, RowAction, SelectModifiers,
+        SelectionSummary, TableFilter, ToolbarCommand, VisibleRow, group_by_key, is_seeding_row,
+        percent_label, row_actions, seeding_upload_speed, task_command,
     };
     use crate::{
         model::{
@@ -4291,7 +4308,7 @@ mod tests {
         let mut delegate = delegate(&[2, 2, 2])?;
         delegate.refresh_view();
         // 普通单击选中 t0 后点 t1 的复选框：以 t1 开启多选，不并入单击选中的行。
-        delegate.select_task(RowKey::Local("t0".into()), Modifiers::default());
+        delegate.select_task(RowKey::Local("t0".into()), SelectModifiers::default());
         delegate.toggle_multi_select(RowKey::Local("t1".into()));
         assert!(delegate.in_multi_select());
         assert_eq!(
@@ -4364,8 +4381,8 @@ mod tests {
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t2".into()), RowKey::Local("t3".into())])
         );
-        delegate.select_task(RowKey::Local("t2".into()), Modifiers::default());
-        delegate.select_task(RowKey::Local("t1".into()), Modifiers::default());
+        delegate.select_task(RowKey::Local("t2".into()), SelectModifiers::default());
+        delegate.select_task(RowKey::Local("t1".into()), SelectModifiers::default());
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t2".into())])
@@ -4375,7 +4392,7 @@ mod tests {
 
         // 结束后恢复可选。
         delegate.finish_delete(&["t0".to_owned(), "t1".to_owned()]);
-        delegate.select_task(RowKey::Local("t0".into()), Modifiers::default());
+        delegate.select_task(RowKey::Local("t0".into()), SelectModifiers::default());
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t0".into())])
@@ -4676,14 +4693,14 @@ mod tests {
     fn group_click_selects_members_and_select_all_covers_collapsed_groups() -> Result<(), I18nError>
     {
         let mut delegate = grouped_delegate()?;
-        delegate.select_group("g", Modifiers::default());
+        delegate.select_group("g", SelectModifiers::default());
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([local("t0"), local("t1"), local("t2")])
         );
         assert_eq!(delegate.focused_group(), Some("g"));
         // 选区不再恰好是该组时，停靠面板不再显示组概览。
-        delegate.select_task(local("t3"), Modifiers::default());
+        delegate.select_task(local("t3"), SelectModifiers::default());
         assert_eq!(delegate.focused_group(), None);
 
         // 折叠的组也在「全选」范围内。
@@ -4691,7 +4708,13 @@ mod tests {
         assert_eq!(delegate.selection_summary().count, 4);
 
         // Cmd/Ctrl 单击整组移出 / 并入选区。
-        delegate.select_group("g", Modifiers::secondary_key());
+        delegate.select_group(
+            "g",
+            SelectModifiers {
+                toggle: true,
+                ..SelectModifiers::default()
+            },
+        );
         assert_eq!(delegate.selected_tasks, HashSet::from([local("t3")]));
         Ok(())
     }
@@ -4728,12 +4751,12 @@ mod tests {
         delegate.refresh_view();
         let first = delegate.row_key_at(1).expect("first task");
         let last = delegate.row_key_at(5).expect("last task");
-        delegate.select_task(first, Modifiers::default());
+        delegate.select_task(first, SelectModifiers::default());
         delegate.select_task(
             last,
-            Modifiers {
+            SelectModifiers {
                 shift: true,
-                ..Modifiers::default()
+                ..SelectModifiers::default()
             },
         );
         assert_eq!(delegate.selected_tasks.len(), 4);
@@ -5040,8 +5063,8 @@ mod tests {
                         if step % 19 == 0
                             && let Some(key) = fast.visible_task_keys().first().cloned()
                         {
-                            fast.select_task(key.clone(), Modifiers::default());
-                            full.select_task(key, Modifiers::default());
+                            fast.select_task(key.clone(), SelectModifiers::default());
+                            full.select_task(key, SelectModifiers::default());
                         }
                     }
                     assert!(fast.full_sort_count < full.full_sort_count);

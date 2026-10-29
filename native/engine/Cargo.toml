@@ -34,7 +34,9 @@ rand = "0.9"
 # 与 feed-rs 同版本：feed 扩展命名空间（Mikan `<torrent><pubDate>`）的二次扫描。
 quick-xml = { version = "0.41", features = ["encoding"] }
 regex = "1"
-rquickjs = { version = "0.12.1", features = ["full-async", "parallel"], optional = true }
+# 与 gpui-shell 同一 Longbridge `quickjs-jit` 分叉（rquickjs API；以 `rquickjs` 名引用）。禁止叠加
+# `rust-alloc` / `allocator`（`set_memory_limit` 会静默失效）；`parallel` 必带（Async* 的 Send/Sync）。
+rquickjs = { package = "quickjs-jit", version = "0.14.1", features = ["full-async", "parallel"], optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"

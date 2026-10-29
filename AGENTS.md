@@ -115,7 +115,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 - **feature 门控**：`plugins` / `components` 默认关（desktop / server 开，mobile / CLI 关），关闭时下载主链路零行为变化（no-op `PluginManager`）。`bt` / `ed2k` 默认开；iOS 商店 flavor 以 `--no-default-features` 剔除 librqbit 与 eD2K，建此类任务返回明确拒绝。**商店包对本机与远端主机一律不含 P2P 与插件 / 组件功能**（入口、页面、选择处理、scheme / 文档类型编译期剔除；曾因「远端主机才出现的功能」被以 App Review 5.6 拒审），新增相关 iOS 界面同样门控（Swift `FULL_FLAVOR`）。
 
 **编译期陷阱**
-- 根 `[patch.crates-io]` 的 rquickjs 分叉 / gpui-fast / gpui-kit 同 rev / librqbit-dualstack-sockets 与 `profile.release` 不设 `panic="abort"`：改 `Cargo.toml` / `Cargo.lock` / `third_party/` 前读 `rule://workspace-patches`。
+- GPUI = crates.io gpui-fast + gpui-kit 同一发布版（各包开 `gpui-fast` feature）、engine 的 `quickjs-jit` 与 gpui-shell 同版本、根 `[patch.crates-io]` 的 librqbit 系补丁 / `third_party/librqbit-dualstack-sockets` 与 `profile.release` 不设 `panic="abort"`：改 `Cargo.toml` / `Cargo.lock` / `third_party/` 前读 `rule://workspace-patches`。
 - **gpui-fast 保留模式**：render 读的状态必须在 entity / global / `ListState` / `ScrollHandle` 内，否则改了要 notify 读者 view；父 view notify 不再重建子 view；渲染期不得无条件写 entity / global。
 - **headless Web UI 编译期内嵌**（`web-ui` feature，`FLUXDOWN_EMBED_WEBROOT` 缺省 `web/dist`）：改前端必须先 `cd web && bun run build` 再重编 agent；Vite 别名引用 `assets/i18n` 与 `website-v2/src/lib/gpui-theme`，打包上下文须包含两处。
 

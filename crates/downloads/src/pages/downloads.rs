@@ -18,7 +18,7 @@ use crate::{
     },
     components::{
         task_table::{
-            DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+            DownloadTableDelegate, SelectModifiers, SelectionSummary, TableFilter, ToolbarCommand,
             spawn_midnight_refresh, task_menu_facts_for,
         },
         title_bar::{DownloadSearchBox, DownloadTitleBar, DownloadViewMenu},
@@ -1254,7 +1254,7 @@ impl DownloadView {
         self.table_state.update(cx, |table, cx| {
             table
                 .delegate_mut()
-                .select_task(key.clone(), gpui::Modifiers::default());
+                .select_task(key.clone(), SelectModifiers::default());
             cx.notify();
         });
         self.open_detail_for(key, window, cx);
@@ -1394,7 +1394,7 @@ impl DownloadView {
         self.table_state.update(cx, |table, cx| {
             table
                 .delegate_mut()
-                .select_group(&group_id, gpui::Modifiers::default());
+                .select_group(&group_id, SelectModifiers::default());
             cx.notify();
         });
         self.bind_group_detail(group_id, cx);
