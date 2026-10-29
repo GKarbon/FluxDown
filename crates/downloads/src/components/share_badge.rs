@@ -1,7 +1,8 @@
 //! 任务表状态列的FluxMesh来源角标：FluxMesh接收任务显示当前承载数据的路径（直连局域网 / 直连公网 /
-//! 中继 / 连接中），走中继时附「切换桥接」入口。角标与状态文案同字号档，单行省略，不改变行高。
+//! 中继 / 连接中），走中继时附「切换桥接」入口；已完成且仍在回传（共享）的接收任务显示「共享中」。
+//! 角标与状态文案同字号档，单行省略，不改变行高。
 
-use fluxdown_protocol::{SharePathKind, ShareSwarmBlock, ShareTaskFactsDto};
+use fluxdown_protocol::{SharePathKind, ShareProvideState, ShareSwarmBlock, ShareTaskFactsDto};
 use fluxdown_ui_components::{FluxIcon, tooltip_view};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -12,7 +13,7 @@ use gpui_component::{Icon, h_flex};
 
 use crate::{pages::downloads::DownloadView, strings::DownloadStrings};
 
-/// 角标着色语气：直连与云端副本 = 成功，中继与桥接 = 警示（限速 / 回退来源），未选定路径 = 中性。
+/// 角标着色语气：直连、云端副本与共享中 = 成功，中继与桥接 = 警示（限速 / 回退来源），未选定路径 = 中性。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShareTone {
     Good,
@@ -31,6 +32,8 @@ pub(crate) enum SwitchBridge {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ShareBadge {
     pub(crate) kind: SharePathKind,
+    /// 已完成任务仍在回传（共享）：显示「共享中」而不是传输路径。
+    pub(crate) providing: bool,
     /// 共享对端数；`> 0` 时角标追加「+N 台设备」。
     pub(crate) peers: u32,
     pub(crate) tone: ShareTone,
@@ -41,10 +44,21 @@ pub(crate) struct ShareBadge {
 }
 
 /// 任务事实 → 角标；不是FluxMesh接收任务时没有角标。`active` = 任务仍在进行（等待 / 下载中 / 暂停）：
-/// 已完成或失败的任务保留来源角标，但不再提供切换。
+/// 进行中显示传输路径；未进行（已完成 / 失败）且接收记录仍在共享时显示「共享中」，其余未进行的
+/// 任务保留来源角标但不再提供切换。
 pub(crate) fn badge_for(facts: &ShareTaskFactsDto, active: bool) -> Option<ShareBadge> {
     if !facts.is_share_receive {
         return None;
+    }
+    if !active && facts.provide_state == ShareProvideState::Providing {
+        return Some(ShareBadge {
+            kind: facts.path_kind,
+            providing: true,
+            peers: 0,
+            tone: ShareTone::Good,
+            switch_bridge: None,
+            swarm_block: None,
+        });
     }
     let tone = match facts.path_kind {
         SharePathKind::DirectLan
@@ -62,6 +76,7 @@ pub(crate) fn badge_for(facts: &ShareTaskFactsDto, active: bool) -> Option<Share
         });
     Some(ShareBadge {
         kind: facts.path_kind,
+        providing: false,
         peers: facts.swarm_peers,
         tone,
         switch_bridge,
@@ -94,7 +109,11 @@ pub(crate) fn share_badge(
     let tokens = theme.tokens();
     let text = &tokens.typography.xs;
     let color = tone_color(badge.tone, cx);
-    let mut label = strings.share_path(badge.kind);
+    let mut label = if badge.providing {
+        strings.share_providing_badge.clone()
+    } else {
+        strings.share_path(badge.kind)
+    };
     if badge.peers > 0 {
         label = SharedString::from(format!(
             "{label} {}",
@@ -284,6 +303,62 @@ mod tests {
         );
         assert_eq!(
             switch(SharePathKind::Relay, false),
+            Some(Some(SwitchBridge::Hint))
+        );
+    }
+
+    fn providing(kind: SharePathKind, receive: bool) -> ShareTaskFactsDto {
+        ShareTaskFactsDto {
+            provide_state: ShareProvideState::Providing,
+            ..facts(kind, false, receive)
+        }
+    }
+
+    #[test]
+    fn finished_providing_task_shows_the_providing_badge_without_switch() {
+        let badge = badge_for(&providing(SharePathKind::Unknown, true), false);
+        assert_eq!(
+            badge,
+            Some(ShareBadge {
+                kind: SharePathKind::Unknown,
+                providing: true,
+                peers: 0,
+                tone: ShareTone::Good,
+                switch_bridge: None,
+                swarm_block: None,
+            })
+        );
+    }
+
+    #[test]
+    fn finished_task_that_is_not_providing_gets_no_providing_badge() {
+        // 已完成且非共享：agent 不下发 facts，下载页没有角标。
+        assert_eq!(badge_for(&ShareTaskFactsDto::default(), false), None);
+        for state in [
+            ShareProvideState::Off,
+            ShareProvideState::Stopped,
+            ShareProvideState::Ended,
+        ] {
+            let facts = ShareTaskFactsDto {
+                provide_state: state,
+                ..facts(SharePathKind::DirectWan, false, true)
+            };
+            assert!(!badge_for(&facts, false).is_some_and(|badge| badge.providing));
+        }
+        // 不是接收任务时，即使状态是 providing 也没有角标。
+        assert_eq!(
+            badge_for(&providing(SharePathKind::Unknown, false), false),
+            None
+        );
+    }
+
+    #[test]
+    fn active_task_keeps_the_path_badge_even_when_providing() {
+        let badge = badge_for(&providing(SharePathKind::Relay, true), true);
+        assert_eq!(badge.map(|badge| badge.providing), Some(false));
+        assert_eq!(badge.map(|badge| badge.kind), Some(SharePathKind::Relay));
+        assert_eq!(
+            badge.map(|badge| badge.switch_bridge),
             Some(Some(SwitchBridge::Hint))
         );
     }

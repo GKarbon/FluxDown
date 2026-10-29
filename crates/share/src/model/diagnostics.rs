@@ -299,7 +299,7 @@ pub fn find_session<'a>(
         .find(|session| session.session_id == session_id)
 }
 
-/// 会话列表的展开 / 聚焦状态：管理页收到「定位到某会话」请求时聚焦并展开它，其余会话由用户手动展开。
+/// 会话列表的展开 / 聚焦状态：网络诊断页收到「定位到某会话」请求时聚焦并展开它，其余会话由用户手动展开。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionExpansion {
     focused: Option<String>,

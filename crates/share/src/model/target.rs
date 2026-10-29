@@ -7,18 +7,8 @@ use fluxdown_protocol::ShareDto;
 pub enum PanelTarget {
     /// 从本机已完成任务创建（或取回已有的）分享。
     Tasks(Vec<String>),
-    /// 查看管理页里已有的分享。
+    /// 查看分享页里已有的分享。
     Share(String),
-}
-
-/// FluxMesh管理页的页签。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ManageTab {
-    #[default]
-    Mine,
-    Received,
-    Usage,
-    Network,
 }
 
 /// 任务集的规范键：去重后按字典序排序再拼接，所以多选的点选顺序不影响窗口去重。

@@ -6,10 +6,10 @@ use fluxdown_protocol::{
     ApplicationErrorCode, RpcErrorData, ShareAppealParams, ShareConfigDto,
     ShareConvertToCloudParams, ShareCreateParams, ShareDiagnosticsDto, ShareDiagnosticsParams,
     ShareDismissPendingParams, ShareDto, ShareIdParams, ShareLocalConfigDto, ShareLogsDto,
-    ShareLogsParams, ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveRecordsPage,
-    ShareReceiveRecordsParams, ShareReceiveResultDto, ShareReportParams, ShareResolveDto,
-    ShareResolveParams, ShareSessionKillParams, ShareStopProvidingParams,
-    ShareSwitchToBridgeParams, ShareTaskFactsDto, ShareUpdateParams, ShareUsageDto, method,
+    ShareLogsParams, ShareReceiveParams, ShareReceiveRecordDto, ShareReceiveResultDto,
+    ShareReportParams, ShareResolveDto, ShareResolveParams, ShareSessionKillParams,
+    ShareStopProvidingParams, ShareSwitchToBridgeParams, ShareTaskFactsDto, ShareUpdateParams,
+    ShareUsageDto, method,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -126,13 +126,6 @@ impl ShareApi {
                 resolve_id: resolve_id.to_owned(),
             },
         )
-    }
-
-    pub fn receive_records(
-        &self,
-        params: &ShareReceiveRecordsParams,
-    ) -> PortFuture<ShareReceiveRecordsPage> {
-        self.invoke(method::AGENT_SHARE_RECEIVE_RECORDS, params)
     }
 
     pub fn switch_to_bridge(&self, task_id: &str) -> PortFuture<ShareTaskFactsDto> {

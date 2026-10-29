@@ -8,7 +8,6 @@ pub mod logs;
 pub mod panel;
 pub mod pickup;
 pub mod receive;
-pub mod records;
 pub mod refresh;
 pub mod settings_form;
 pub mod status;
@@ -26,6 +25,6 @@ pub use pickup::{
 pub use status::{
     AppealUi, NetHealth, NetSegment, ShareAction, appeal_state, batch_actions, home_relay_latency,
     is_editable, nat_key, net_health, net_segments, ordered_shares, path_kind_key,
-    provide_state_key, receive_status_key, share_headline, share_status_key, source_missing_badge,
+    provide_state_key, share_headline, share_status_key, source_missing_badge,
 };
-pub use target::{ManageTab, PanelTarget, panel_key, tasks_key};
+pub use target::{PanelTarget, panel_key, tasks_key};

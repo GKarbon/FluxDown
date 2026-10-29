@@ -1,6 +1,6 @@
 //! 举报对话框：5 个固定原因单选 + 补充说明 + 联系方式，经 `agent.share.report` 提交。
 //!
-//! 入口刻意弱化（接收确认页脚的文字按钮、接收记录行的旗帜图标），不占主按钮区。
+//! 入口刻意弱化（接收确认页脚的文字按钮、任务详情「传输诊断」接收信息行的文字按钮），不占主按钮区。
 
 use fluxdown_protocol::{ShareReportParams, ShareReportReason};
 use fluxdown_ui_components::{

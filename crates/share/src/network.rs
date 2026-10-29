@@ -1,7 +1,7 @@
-//! 管理页「网络诊断」页签：端点与 NAT / 中继 / 公网地址、各中继延迟、传输会话（可展开路径与事件时间线）、
+//! 设置 › FluxMesh › 「网络诊断」页签：端点与 NAT / 中继 / 公网地址、各中继延迟、传输会话（可展开路径与事件时间线）、
 //! 完整 iroh 指标表、iroh 日志查看器与原始快照 JSON。
 //!
-//! 空闲静默：只在页签实际渲染（可见）时取数。hub 变化与定时器只会把 `dirty` 置位并通知，真正的取数由
+//! 空闲静默：只在视图实际渲染（可见）时取数。hub 变化与定时器只会把 `dirty` 置位并通知，真正的取数由
 //! 渲染发起，页面被隐藏（不渲染）期间不会有任何请求；隐藏后再显示若数据已陈旧也会补取一次。
 
 use std::{ops::Range, time::Instant};
@@ -100,7 +100,8 @@ struct LogsState {
     request: u64,
 }
 
-pub(crate) struct NetworkTab {
+/// 网络诊断视图：自管纵向滚动，放进设置页 fill_height 的 Tab。
+pub struct ShareNetworkView {
     hub: Entity<ShareHub>,
     translator: Entity<Translator>,
     epoch: Instant,
@@ -122,11 +123,13 @@ pub(crate) struct NetworkTab {
     snapshot_scroll: NestedScroll,
 }
 
-impl NetworkTab {
-    pub(crate) fn new(hub: Entity<ShareHub>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl ShareNetworkView {
+    /// 创建网络诊断视图；观察 hub 并吸收 [`ShareHub::request_diagnostics`] 的定位请求（含创建前已挂起的）。
+    pub fn new(hub: Entity<ShareHub>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let translator = hub.read(cx).translator().clone();
         let level = hub.read(cx).state().local_config.iroh_log_level;
         cx.observe(&hub, |this, _, cx| {
+            this.absorb_request(cx);
             this.refresh.mark_dirty();
             cx.notify();
         })
@@ -153,7 +156,7 @@ impl NetworkTab {
         })
         .detach();
 
-        Self {
+        let mut view = Self {
             hub,
             translator,
             epoch: Instant::now(),
@@ -180,15 +183,25 @@ impl NetworkTab {
             metrics_scroll: NestedScroll::new(),
             logs_scroll: NestedScroll::new(),
             snapshot_scroll: NestedScroll::new(),
-        }
+        };
+        // 视图创建前就已挂起的诊断请求（app 先请求再创建设置页）。
+        view.absorb_request(cx);
+        view
     }
 
     fn now_ms(&self) -> u64 {
         u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// 管理页收到「定位到某会话」请求：聚焦并展开该会话，并刷新数据。
-    pub(crate) fn focus_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    /// 吸收 hub 上挂起的诊断请求：带会话 ID 则聚焦并展开该会话，并刷新数据。
+    fn absorb_request(&mut self, cx: &mut Context<Self>) {
+        let request = self.hub.update(cx, |hub, _| hub.take_diagnostics_request());
+        if let Some(Some(session_id)) = request {
+            self.focus_session(&session_id, cx);
+        }
+    }
+
+    fn focus_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         self.sessions.focus(session_id);
         self.refresh.mark_dirty();
         cx.notify();
@@ -406,7 +419,7 @@ fn level_color(level: ShareLogLevel, cx: &App) -> Hsla {
     }
 }
 
-impl Render for NetworkTab {
+impl Render for ShareNetworkView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_placeholders(window, cx);
         self.refresh_if_needed(cx);
@@ -467,7 +480,7 @@ impl Render for NetworkTab {
     }
 }
 
-impl NetworkTab {
+impl ShareNetworkView {
     fn refresh_button(&self, stale: bool, cx: &mut Context<Self>) -> AnyElement {
         let label = text(self.translator.read(cx), "shareNetRefresh");
         let icon = Icon::new(FluxIcon::RotateCw).size(active_theme(cx).extended().icon.md);

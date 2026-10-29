@@ -35,8 +35,8 @@ use crate::{
             BuiltRequests, DEFAULT_HASH_ALGORITHM, DraftOptions, HASH_ALGORITHMS, MAX_THREADS,
             ProxyChoice, THREAD_PRESETS, ThreadChoice, UA_PRESET_CUSTOM, UA_PRESET_DEFAULT,
             UrlEntry, append_entries, build_requests, capture_entry, checksum_spec,
-            compose_request, custom_segments, detect_ua_preset, manual_proxy_url, parse_entries,
-            parse_input, share_note, ua_preset_keys, ua_preset_value,
+            compose_request, custom_segments, detect_ua_preset, is_pickup_code, manual_proxy_url,
+            parse_entries, parse_input, share_note, ua_preset_keys, ua_preset_value,
         },
         save_dir_category::{CategoryMode, NewDownloadCategory, category_options},
         save_dir_history::{read_save_dir_history, record_save_dir, save_dir_choices},
@@ -121,6 +121,8 @@ pub struct NewDownloadContext {
     pub targets: Vec<DeviceEntry>,
     /// 「下载到」初值：设备本地偏好里上次的目标（目标已不存在则为本机）。
     pub target: DispatchTarget,
+    /// 云端取件码位数（0 = 未知，按默认 6 位）：输入里整行恰为该位数的数字识别为取件码。
+    pub pickup_code_length: u8,
 }
 
 /// 从 agent 快照投影「新建下载」环境（无主窗口时的外部捕获确认、菜单入口共用规则）。
@@ -138,6 +140,7 @@ pub fn new_download_context_from_snapshot(snapshot: &AgentSnapshot) -> NewDownlo
             snapshot.cloud_connection.state == fluxdown_protocol::CloudConnectionState::Connected,
             true,
         ),
+        snapshot.share.policy_summary.pickup_code_length,
     )
 }
 
@@ -163,6 +166,7 @@ pub(crate) fn build_new_download_context(
     queues: &[QueueDto],
     selected_queue: Option<&str>,
     targets: Vec<DeviceEntry>,
+    pickup_code_length: u8,
 ) -> NewDownloadContext {
     let config_str = |key: &str| config.get(key).map_or("", |value| value.trim());
     let remember = preferences
@@ -228,6 +232,7 @@ pub(crate) fn build_new_download_context(
         initial_urls: Vec::new(),
         targets,
         target,
+        pickup_code_length,
     }
 }
 
@@ -561,7 +566,11 @@ impl NewDownloadView {
     }
 
     fn refresh_entries(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let parsed = parse_input(&self.urls.read(cx).value(), false);
+        let parsed = parse_input(
+            &self.urls.read(cx).value(),
+            false,
+            self.context.pickup_code_length,
+        );
         self.entries = parsed.entries;
         self.share_links = parsed.share_links;
         self.sync_site_auth(window, cx);
@@ -861,7 +870,12 @@ impl NewDownloadView {
         if self.open_share_receive.is_none() {
             return Some((self.strings.share_unavailable_note.clone(), true));
         }
-        share_note(self.entries.len(), self.pending_share_links().count())
+        let pending = self.pending_share_links().count();
+        let pending_codes = self
+            .pending_share_links()
+            .filter(|item| is_pickup_code(item))
+            .count();
+        share_note(self.entries.len(), pending, pending_codes)
             .map(|note| (self.strings.format_share_note(note), false))
     }
 
@@ -945,6 +959,7 @@ impl NewDownloadView {
             category_options,
             custom_categories,
             manual_proxy_url,
+            pickup_code_length,
             ..
         } = context;
         if save_dir != self.context.save_dir
@@ -985,6 +1000,10 @@ impl NewDownloadView {
             self.category_mode = CategoryMode::Auto;
         }
         self.context.manual_proxy_url = manual_proxy_url;
+        if self.context.pickup_code_length != pickup_code_length {
+            self.context.pickup_code_length = pickup_code_length;
+            self.refresh_entries(window, cx);
+        }
         self.sync_category(window, cx);
         cx.notify();
     }

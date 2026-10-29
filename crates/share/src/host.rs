@@ -5,14 +5,16 @@ use std::rc::Rc;
 
 use gpui::{App, Window};
 
-use crate::model::{ManageTab, PanelTarget};
+use crate::model::PanelTarget;
 
 /// 打开 / 置前一个分享面板窗口。
 pub type PanelOpener = Rc<dyn Fn(PanelTarget, &mut Window, &mut App)>;
 /// 打开 / 置前接收确认窗口：参数是取件码或分享链接（空串 = 只打开输入态）。
 pub type ReceiveOpener = Rc<dyn Fn(String, &mut Window, &mut App)>;
-/// 切到FluxMesh管理页的某个页签（`Option<String>` = 要聚焦的会话 ID）。
-pub type ManageOpener = Rc<dyn Fn(ManageTab, Option<String>, &mut Window, &mut App)>;
+/// 切到分享页（活动栏路由）。
+pub type ManageOpener = Rc<dyn Fn(&mut Window, &mut App)>;
+/// 打开设置 › FluxMesh › 网络诊断（`Option<String>` = 要聚焦的会话 ID）。
+pub type DiagnosticsOpener = Rc<dyn Fn(Option<String>, &mut Window, &mut App)>;
 /// 打开账号页（购买流量包 / 升级会员 / 登录）。
 pub type AccountOpener = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -21,5 +23,6 @@ pub struct ShareHost {
     pub open_panel: Option<PanelOpener>,
     pub open_receive: Option<ReceiveOpener>,
     pub open_manage: Option<ManageOpener>,
+    pub open_diagnostics: Option<DiagnosticsOpener>,
     pub open_account: Option<AccountOpener>,
 }

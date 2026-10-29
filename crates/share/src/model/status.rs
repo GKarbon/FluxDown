@@ -2,7 +2,7 @@
 
 use fluxdown_protocol::{
     ShareAppealStatus, ShareCloudState, ShareDto, ShareNatType, ShareNetStatusDto, SharePathKind,
-    ShareProvideState, ShareReceiveStatus, ShareStatus,
+    ShareProvideState, ShareStatus,
 };
 
 /// 本机作为分享方「别人此刻能否找到并直连」的粗分级，驱动状态点颜色与文案。
@@ -139,16 +139,6 @@ pub const fn share_status_key(status: ShareStatus) -> &'static str {
         ShareStatus::Stopped => "shareStatusStopped",
         ShareStatus::Unknown => "shareStatusUnknown",
         ShareStatus::Takedown => "shareStatusTakedown",
-    }
-}
-
-/// 接收记录状态文案键。
-#[must_use]
-pub const fn receive_status_key(status: ShareReceiveStatus) -> &'static str {
-    match status {
-        ShareReceiveStatus::Active => "shareReceiveStatusActive",
-        ShareReceiveStatus::Completed => "shareReceiveStatusCompleted",
-        ShareReceiveStatus::Failed => "shareReceiveStatusFailed",
     }
 }
 

@@ -42,7 +42,7 @@ pub fn switch_to_bridge(hub: &Entity<ShareHub>, task_id: &str, window: &Window, 
     .detach();
 }
 
-/// 接收记录「停止共享」：调用 `agent.share.stopProviding`。行状态由随后的 `ShareChanged` 刷新；
+/// 任务「停止共享」（任务详情「传输诊断」页 / 任务右键菜单）：调用 `agent.share.stopProviding`。行状态由随后的 `ShareChanged` 刷新；
 /// 失败时在触发窗口弹出带类型的错误文案。
 pub fn stop_providing(hub: &Entity<ShareHub>, record_id: &str, window: &Window, cx: &mut App) {
     let handle = window.window_handle();

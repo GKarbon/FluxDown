@@ -256,6 +256,7 @@ impl TaskDetailView {
             send: host.share_tasks.is_some(),
             switch_bridge: host.share_switch_to_bridge.is_some(),
             open_usage: host.share_open_usage.is_some(),
+            stop_providing: host.share_stop_providing.is_some(),
         });
         let seed_ratio = Self::seed_input(window, cx, |t| parse_seed_ratio(t).is_some(), "1.00");
         let seed_post_ratio =

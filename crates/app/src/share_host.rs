@@ -1,13 +1,13 @@
-//! FluxMesh宿主装配：状态中枢与 agent 会话的接入、窗口入口（分享面板 / 接收确认 / 管理页）、
+//! FluxMesh宿主装配：状态中枢与 agent 会话的接入、窗口入口（分享面板 / 接收确认 / 分享页 / 网络诊断）、
 //! 链接触发的待确认接收自动弹窗，以及FluxMesh可用性对活动栏入口的联动。
 
 use std::{rc::Rc, sync::Arc};
 
 use fluxdown_ui_downloads::{DownloadHostActions, IdOpener};
 use fluxdown_ui_i18n::Translator;
+use fluxdown_ui_settings::SettingsTarget;
 use fluxdown_ui_share::{
-    ManageTab, PanelTarget, ReceiveSource, ShareApi, ShareDiagnosticsView, ShareHost, ShareHub,
-    ShareHubEvent,
+    PanelTarget, ReceiveSource, ShareApi, ShareDiagnosticsView, ShareHost, ShareHub, ShareHubEvent,
 };
 use gpui::{App, AppContext as _, Entity};
 
@@ -57,8 +57,9 @@ fn host() -> ShareHost {
         open_receive: Some(Rc::new(|input, _, cx| {
             crate::windows::share_receive::open(cx, ReceiveSource::Input(input));
         })),
-        open_manage: Some(Rc::new(|tab, session_id, _, cx| {
-            open_manage(cx, tab, session_id);
+        open_manage: Some(Rc::new(|_, cx| open_manage(cx))),
+        open_diagnostics: Some(Rc::new(|session_id, _, cx| {
+            open_diagnostics(cx, session_id);
         })),
         open_account: Some(Rc::new(|_, cx| crate::activity::open_account(cx))),
     }
@@ -69,12 +70,26 @@ pub(crate) fn open_panel(cx: &mut App, target: PanelTarget) {
     crate::windows::share::open(cx, target);
 }
 
-/// 主窗口到前台并切到FluxMesh管理页的指定页签（可聚焦某个会话）。
-pub(crate) fn open_manage(cx: &mut App, tab: ManageTab, session_id: Option<String>) {
-    cx.defer(move |cx| {
+/// 主窗口到前台并切到FluxMesh分享页。
+pub(crate) fn open_manage(cx: &mut App) {
+    cx.defer(|cx| {
         crate::command_palette::navigate_now(cx, SHARE_ROUTE);
+    });
+}
+
+/// 打开设置 › FluxMesh › 网络诊断（可聚焦某个会话）。
+pub(crate) fn open_diagnostics(cx: &mut App, session_id: Option<String>) {
+    cx.defer(move |cx| {
         let hub = Desktop::global(cx).share_hub.clone();
-        hub.update(cx, |hub, cx| hub.request_manage(tab, session_id, cx));
+        hub.update(cx, |hub, cx| hub.request_diagnostics(session_id, cx));
+        crate::windows::settings::reveal(
+            cx,
+            SettingsTarget {
+                page: "share",
+                tab: "network",
+                row: None,
+            },
+        );
     });
 }
 
@@ -96,7 +111,18 @@ pub(crate) fn extend_download_actions(host: &mut DownloadHostActions, hub: &Enti
         fluxdown_ui_share::switch_to_bridge(&bridge_hub, &task_id, window, cx);
     }));
     host.share_open_usage = Some(Rc::new(|_, _, cx| {
-        open_manage(cx, ManageTab::Usage, None);
+        crate::windows::settings::reveal(
+            cx,
+            SettingsTarget {
+                page: "account",
+                tab: "",
+                row: None,
+            },
+        );
+    }));
+    let stop_hub = hub.clone();
+    host.share_stop_providing = Some(Rc::new(move |record_id, window, cx| {
+        fluxdown_ui_share::stop_providing(&stop_hub, &record_id, window, cx);
     }));
     let diagnostics_hub = hub.clone();
     host.share_diagnostics_view = Some(Rc::new(move |task_id, window, cx| {

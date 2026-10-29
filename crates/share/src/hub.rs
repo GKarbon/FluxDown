@@ -1,6 +1,6 @@
 //! FluxMesh状态中枢：整个应用唯一一份 `AgentSnapshot.share` 的投影。
 //!
-//! 管理页、分享面板、接收窗口、设置页与诊断视图都观察同一个 `ShareHub`（跨窗口共享实体），
+//! 分享页、分享面板、接收窗口、设置页与诊断视图都观察同一个 `ShareHub`（跨窗口共享实体），
 //! 由 app 把 agent 会话的快照 / 事件喂进来；视图只读状态、经 [`ShareApi`] 发命令。
 
 use fluxdown_protocol::{
@@ -10,14 +10,7 @@ use fluxdown_protocol::{
 use fluxdown_ui_i18n::Translator;
 use gpui::{Context, Entity, EventEmitter};
 
-use crate::{host::ShareHost, model::ManageTab, port::ShareApi};
-
-/// 请求管理页定位到某个页签（可带要聚焦的会话）；由管理页消费。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ManageRequest {
-    pub tab: ManageTab,
-    pub session_id: Option<String>,
-}
+use crate::{host::ShareHost, port::ShareApi};
 
 /// hub 对外发出的一次性事件。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,7 +29,8 @@ pub struct ShareHub {
     /// agent 当前有账号会话（云端暂存的转换 / 删除要求已登录，游客会被拒）。
     signed_in: bool,
     host: ShareHost,
-    manage_request: Option<ManageRequest>,
+    /// 待网络诊断视图吸收的定位请求：外层 `Some` = 有请求，内层 = 要聚焦的会话 ID。
+    diagnostics_request: Option<Option<String>>,
     /// 已宣告过的待确认接收，避免同一个预览反复弹窗。
     announced_pending: Option<String>,
 }
@@ -52,7 +46,7 @@ impl ShareHub {
             stale: true,
             signed_in: false,
             host: ShareHost::default(),
-            manage_request: None,
+            diagnostics_request: None,
             announced_pending: None,
         }
     }
@@ -127,20 +121,15 @@ impl ShareHub {
         &self.state.hashing
     }
 
-    /// 请求管理页定位（由 app 的 `open_manage` 调用）。
-    pub fn request_manage(
-        &mut self,
-        tab: ManageTab,
-        session_id: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.manage_request = Some(ManageRequest { tab, session_id });
+    /// 请求网络诊断页定位（由 app 的 `open_diagnostics` 调用；`session_id` = 要聚焦的会话）。
+    pub fn request_diagnostics(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        self.diagnostics_request = Some(session_id);
         cx.notify();
     }
 
-    /// 取走待处理的定位请求（管理页渲染 / 观察时调用）。
-    pub fn take_manage_request(&mut self) -> Option<ManageRequest> {
-        self.manage_request.take()
+    /// 取走待处理的诊断定位请求（网络诊断视图创建 / 观察时调用）。
+    pub fn take_diagnostics_request(&mut self) -> Option<Option<String>> {
+        self.diagnostics_request.take()
     }
 
     /// 状态整段替换后：新出现的待确认接收只宣告一次；预览消失则允许同一 ID 之外的新预览再次宣告。

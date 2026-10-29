@@ -1,5 +1,5 @@
 //! 一个传输会话的诊断详情渲染：会话摘要、逐路径统计、路径事件时间线。
-//! 管理页「网络诊断」里展开的会话与任务详情「传输诊断」页共用同一份。
+//! 设置 › FluxMesh › 网络诊断里展开的会话与任务详情「传输诊断」页共用同一份。
 
 use fluxdown_protocol::{
     SharePathKind, SharePathSummaryDto, ShareSessionBytesDto, ShareSessionDetailDto,

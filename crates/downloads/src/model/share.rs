@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use fluxdown_protocol::{ShareProgressDto, ShareStateDto, ShareTaskFactsDto};
+use fluxdown_protocol::{ShareProgressDto, ShareProvideState, ShareStateDto, ShareTaskFactsDto};
 
 use super::TaskState;
 
@@ -14,6 +14,8 @@ use super::TaskState;
 pub(crate) struct ShareFacts {
     available: bool,
     can_send: bool,
+    /// 云端取件码位数（0 = 未知，按默认 6 位）。
+    pickup_code_length: u8,
     tasks: HashMap<String, ShareTaskFactsDto>,
 }
 
@@ -22,6 +24,7 @@ impl ShareFacts {
         Self {
             available: state.available,
             can_send: state.can_send,
+            pickup_code_length: state.policy_summary.pickup_code_length,
             tasks: state
                 .task_facts
                 .iter()
@@ -40,8 +43,22 @@ impl ShareFacts {
         self.can_send
     }
 
+    /// 云端取件码位数；0 = 未知（新建下载框按默认 6 位识别）。
+    pub(crate) fn pickup_code_length(&self) -> u8 {
+        self.pickup_code_length
+    }
+
     pub(crate) fn task(&self, task_id: &str) -> Option<&ShareTaskFactsDto> {
         self.tasks.get(task_id)
+    }
+
+    /// 该任务所属接收记录仍在共享（可「停止共享」）时返回记录 ID。
+    pub(crate) fn providing_record(&self, task_id: &str) -> Option<&str> {
+        let facts = self.task(task_id)?;
+        if facts.provide_state != ShareProvideState::Providing {
+            return None;
+        }
+        facts.record_id.as_deref()
     }
 
     /// 该任务是FluxMesh接收任务（才有来源徽标 / 传输诊断页）。
@@ -83,8 +100,10 @@ pub(crate) struct ShareHostCaps {
     pub(crate) send: bool,
     /// 「切换桥接」。
     pub(crate) switch_bridge: bool,
-    /// 「额度与贡献」：打开管理页额度页签。
+    /// 「设置 › 账户」额度：打开账户页的额度区。
     pub(crate) open_usage: bool,
+    /// 「停止共享」：停止已接收文件的共享。
+    pub(crate) stop_providing: bool,
 }
 
 /// 分享入口被禁用的原因（决定悬浮提示）。
@@ -271,6 +290,41 @@ mod tests {
             Some(SharePathKind::Relay)
         );
         assert_eq!(ShareFacts::default().task("t1"), None);
+    }
+
+    #[test]
+    fn pickup_code_length_follows_the_policy_summary() {
+        let mut state = facts_state();
+        assert_eq!(ShareFacts::from_state(&state).pickup_code_length(), 0);
+        state.policy_summary.pickup_code_length = 8;
+        assert_eq!(ShareFacts::from_state(&state).pickup_code_length(), 8);
+    }
+
+    #[test]
+    fn providing_record_needs_providing_state_and_a_record_id() {
+        let providing = |state, record: Option<&str>| {
+            let mut snapshot = facts_state();
+            snapshot.task_facts.insert(
+                "t2".into(),
+                ShareTaskFactsDto {
+                    is_share_receive: true,
+                    provide_state: state,
+                    record_id: record.map(str::to_owned),
+                    ..ShareTaskFactsDto::default()
+                },
+            );
+            ShareFacts::from_state(&snapshot)
+                .providing_record("t2")
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            providing(ShareProvideState::Providing, Some("r1")),
+            Some("r1".to_owned())
+        );
+        assert_eq!(providing(ShareProvideState::Providing, None), None);
+        assert_eq!(providing(ShareProvideState::Stopped, Some("r1")), None);
+        assert_eq!(providing(ShareProvideState::Off, Some("r1")), None);
+        assert_eq!(ShareFacts::default().providing_record("t2"), None);
     }
 
     #[test]

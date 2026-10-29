@@ -1,12 +1,17 @@
-//! 任务详情「传输诊断」页签：一个FluxMesh接收任务所属会话的路径时间线、逐路径统计与会话摘要。
+//! 任务详情「传输诊断」页签：一个FluxMesh接收任务的接收信息（分享方 / 共享状态 / 停止共享 / 举报）与所属会话的路径时间线、逐路径统计与会话摘要。
 //!
 //! 视图嵌在详情面板 / 详情窗口里：自己滚动、紧凑、不创建窗口。空闲静默：只在视图实际渲染（可见）时
 //! 取数；hub 变化经节流合并，隐藏期间不产生请求（状态机见 [`crate::model::refresh::VisibleRefresh`]）。
 
 use std::time::Instant;
 
-use fluxdown_protocol::{RpcErrorData, ShareDiagnosticsDto, ShareDiagnosticsParams, SharePathKind};
-use fluxdown_ui_components::{ButtonVariant, ControlExt as _, FluxIcon, loading_icon_button};
+use fluxdown_protocol::{
+    RpcErrorData, ShareDiagnosticsDto, ShareDiagnosticsParams, SharePathKind, ShareProvideState,
+    ShareTaskFactsDto,
+};
+use fluxdown_ui_components::{
+    ButtonVariant, ControlExt as _, FluxIcon, button, loading_icon_button,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -23,14 +28,15 @@ use gpui_component::{
 
 use crate::{
     hub::ShareHub,
-    manage_ui::{chip, clipped, empty_state, kv_row, meta_text, text, tooltip_builder},
+    manage_ui::{chip, clipped, empty_state, kv_row, meta_text, text, text_with, tooltip_builder},
     model::{
         diagnostics::find_session,
-        nat_key, path_kind_key,
+        nat_key, path_kind_key, provide_state_key,
         refresh::{GateAction, VisibleRefresh},
     },
+    report::open_report_dialog,
     session_view::{path_tone, session_detail},
-    switch_to_bridge,
+    stop_providing, switch_to_bridge,
 };
 
 /// 两次取数之间的最短间隔（毫秒）。
@@ -207,6 +213,7 @@ impl Render for ShareDiagnosticsView {
 
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
+        let icon_md = theme.extended().icon.md;
         let translator = self.translator.read(cx).clone();
         let stale = self.hub.read(cx).is_stale();
         let facts = self.hub.read(cx).task_facts(&self.task_id).cloned();
@@ -217,6 +224,12 @@ impl Render for ShareDiagnosticsView {
             .gap(tokens.spacing.md)
             .p(tokens.spacing.md);
 
+        let root = root.children(
+            facts
+                .as_ref()
+                .filter(|facts| facts.is_share_receive)
+                .map(|facts| self.render_receive_info(facts, &translator, stale, cx)),
+        );
         let Some(session_id) = session_id else {
             return root
                 .child(empty_state(
@@ -261,7 +274,7 @@ impl Render for ShareDiagnosticsView {
             loading_icon_button(
                 "share-diag-refresh",
                 label.clone(),
-                Icon::new(FluxIcon::RotateCw).size(theme.extended().icon.md),
+                Icon::new(FluxIcon::RotateCw).size(icon_md),
                 ButtonVariant::Ghost,
                 loading,
                 cx,
@@ -324,6 +337,79 @@ impl Render for ShareDiagnosticsView {
                 }),
         };
         root.overflow_y_scrollbar().id("share-diag-scroll")
+    }
+}
+
+impl ShareDiagnosticsView {
+    /// 接收信息行：分享方设备名、共享状态；正在共享时给「停止共享」，有分享 ID 时给弱化的「举报」。
+    /// 接收记录页签已并入下载任务，这些能力挪到这里（已完成任务没有会话时也照常显示）。
+    fn render_receive_info(
+        &self,
+        facts: &ShareTaskFactsDto,
+        translator: &Translator,
+        stale: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let sender = if facts.sender_device_name.trim().is_empty() {
+            text(translator, "shareSenderUnknown")
+        } else {
+            text_with(
+                translator,
+                "shareReceivedFrom",
+                &[("name", facts.sender_device_name.as_str())],
+            )
+        };
+        let mut row = h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .gap(tokens.spacing.sm)
+            .child(
+                div()
+                    .min_w_0()
+                    .child(clipped("share-diag-sender", sender))
+                    .text_size(tokens.typography.sm.size)
+                    .line_height(tokens.typography.sm.line_height)
+                    .text_color(tokens.colors.foreground),
+            );
+        if let Some(key) = provide_state_key(facts.provide_state) {
+            let tone = (facts.provide_state == ShareProvideState::Providing)
+                .then(|| theme.extended().colors.status_completed);
+            row = row.child(chip("share-diag-provide", text(translator, key), tone, cx));
+        }
+        row = row.child(div().flex_1());
+        if facts.provide_state == ShareProvideState::Providing
+            && let Some(record_id) = facts.record_id.clone()
+        {
+            let hub = self.hub.clone();
+            row = row.child(
+                Button::new("share-diag-stop-providing")
+                    .outline()
+                    .label(text(translator, "shareStopProviding"))
+                    .control(cx)
+                    .disabled(stale)
+                    .on_click(move |_, window, cx| {
+                        stop_providing(&hub, &record_id, window, cx);
+                    }),
+            );
+        }
+        if let Some(share_id) = facts.share_id.clone() {
+            let hub = self.hub.clone();
+            row = row.child(
+                button(
+                    "share-diag-report",
+                    text(translator, "shareReport"),
+                    ButtonVariant::Link,
+                    cx,
+                )
+                .on_click(move |_, window, cx| {
+                    open_report_dialog(&hub, share_id.clone(), window, cx);
+                }),
+            );
+        }
+        row
     }
 }
 

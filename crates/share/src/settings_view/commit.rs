@@ -10,9 +10,9 @@ use super::{ShareSettingsView, TEXT_DEBOUNCE};
 use crate::{
     errors::error_text,
     model::settings_form::{
-        RateUnit, TextEdits, apply_text_inputs, daily_cap_text, extra_addrs_text, is_noop,
-        parse_daily_cap, parse_extra_addrs, parse_port, parse_rate_limit, pinned_relay_from_value,
-        port_text, preferred_rate_unit, rate_text, tier_id_from_value,
+        RateUnit, TextEdits, apply_text_inputs, daily_cap_text, extra_addrs_text, parse_daily_cap,
+        parse_extra_addrs, parse_port, parse_rate_limit, pinned_relay_from_value, port_text,
+        preferred_rate_unit, prepare_commit, rate_text, tier_id_from_value,
     },
 };
 
@@ -43,12 +43,13 @@ impl ShareSettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.editable(cx) || is_noop(&self.shown, &next) {
+        if !self.editable(cx) {
             return;
         }
-        let mut next = next;
-        // 每日上限按本地时区自然日划分：每次提交都带上当前本地 UTC 偏移（无法收敛为 no-op 判定的一部分）。
-        next.provide_day_offset_secs = Some(chrono::Local::now().offset().local_minus_utc());
+        let offset = chrono::Local::now().offset().local_minus_utc();
+        let Some(next) = prepare_commit(&self.shown, next, offset) else {
+            return;
+        };
         self.shown = next.clone();
         self.commit_seq += 1;
         self.inflight += 1;

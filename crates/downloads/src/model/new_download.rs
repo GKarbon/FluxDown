@@ -103,24 +103,26 @@ pub(crate) fn url_file_segment(url: &str) -> Option<&str> {
 /// - 行首为 `aria2c` 的命令（可带路径 / 引号，续行已合并）提取其中的链接与 `-o` /
 ///   `--checksum`（#299，见 [`crate::model::aria2c`]）；不是 aria2c 的行不受影响。
 pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
-    parse_input(text, loose).entries
+    parse_input(text, loose, 0).entries
 }
 
-/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息 + FluxMesh分享链接。
+/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息 + FluxMesh分享链接 / 取件码。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ParsedInput {
     pub(crate) entries: Vec<UrlEntry>,
     /// 第一条产出了条目的 aria2c 命令的头部信息（其余命令的不采用）；没有时为空。
     pub(crate) hints: RequestHints,
-    /// FluxMesh分享链接（`fluxdown://share/<slug>`、官网 `/s/<slug>`），按出现顺序去重。
+    /// FluxMesh分享链接（`fluxdown://share/<slug>`、官网 `/s/<slug>`）与取件码（去掉空白 / `-`
+    /// 后的纯数字串，见 [`pickup_code_in_line`]），按出现顺序去重。
     /// 它们不是下载链接：不进 `entries`，由对话框交给接收确认流程。
     pub(crate) share_links: Vec<String>,
 }
 
 /// 解析规则见 [`parse_entries`]。行首为 `aria2c` 的命令（先合并其续行）按 shell 规则切词，
 /// 提取链接 / `-o` / `--checksum`（#299，详见 [`crate::model::aria2c`]），头部信息随结果
-/// 返回；其余行的行为不变。
-pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
+/// 返回；其余行的行为不变。`pickup_code_length` = 云端取件码位数（0 视为默认 6 位）：整行去掉
+/// 空白与 `-` 后恰为该位数的纯数字时按取件码归入 `share_links`。
+pub(crate) fn parse_input(text: &str, loose: bool, pickup_code_length: u8) -> ParsedInput {
     let visible = strip_invisible(text);
     let text = join_continuations(&visible);
     let mut entries = Vec::new();
@@ -128,7 +130,10 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
     let mut hints: Option<RequestHints> = None;
     let mut current: Option<UrlEntry> = None;
     for line in text.split('\n') {
-        if (line.starts_with(' ') || line.starts_with('\t')) && !starts_with_link(line.trim()) {
+        if (line.starts_with(' ') || line.starts_with('\t'))
+            && !starts_with_link(line.trim())
+            && pickup_code_in_line(line.trim(), pickup_code_length).is_none()
+        {
             let Some(entry) = current.as_mut() else {
                 continue;
             };
@@ -150,6 +155,12 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
         if let Some(link) = share_link_in_line(trimmed, loose) {
             if !share_links.iter().any(|known| known == link) {
                 share_links.push(link.to_owned());
+            }
+            continue;
+        }
+        if let Some(code) = pickup_code_in_line(trimmed, pickup_code_length) {
+            if !share_links.contains(&code) {
+                share_links.push(code);
             }
             continue;
         }
@@ -188,6 +199,35 @@ pub(crate) fn parse_input(text: &str, loose: bool) -> ParsedInput {
     }
 }
 
+/// 默认取件码位数（云端未下发时）。
+const DEFAULT_PICKUP_CODE_LENGTH: usize = 6;
+
+/// 取件码：整行去掉空白与 `-` 后恰为 `length` 位 ASCII 数字（0 = 默认 6 位）。返回去分隔后的
+/// 数字串（接收窗口认的 wire 值）。夹杂其他字符（含全角数字、附注）的行不是取件码。
+pub(crate) fn pickup_code_in_line(line: &str, length: u8) -> Option<String> {
+    let want = if length == 0 {
+        DEFAULT_PICKUP_CODE_LENGTH
+    } else {
+        usize::from(length)
+    };
+    let mut code = String::with_capacity(want);
+    for c in line.chars() {
+        if c.is_whitespace() || c == '-' {
+            continue;
+        }
+        if !c.is_ascii_digit() || code.len() == want {
+            return None;
+        }
+        code.push(c);
+    }
+    (code.len() == want).then_some(code)
+}
+
+/// 分享项是取件码（纯数字）而不是分享链接。
+pub(crate) fn is_pickup_code(share_item: &str) -> bool {
+    !share_item.is_empty() && share_item.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// 行里的FluxMesh分享链接。手动输入只认行首的词（后面的内容是附注，与普通链接一致）；
 /// 宽松模式（TXT 导入）还接受行内任意位置并去掉末尾标点。
 fn share_link_in_line(line: &str, loose: bool) -> Option<&str> {
@@ -214,17 +254,25 @@ fn share_link_in_line(line: &str, loose: bool) -> Option<&str> {
 pub(crate) enum ShareNote {
     /// 只有一条分享链接：提交 = 打开接收确认。
     Link,
-    /// 分享链接与普通链接混合：分享链接打开接收确认，其余照常下载。
+    /// 只有一个取件码：提交 = 打开接收确认。
+    Code,
+    /// 分享链接 / 取件码与普通链接混合：分享项打开接收确认，其余照常下载。
     Mixed,
-    /// 多条分享链接：接收确认一次只处理一条，从第一条开始。
+    /// 多条分享链接 / 取件码：接收确认一次只处理一条，从第一条开始。
     Multiple(usize),
 }
 
-/// `entries` 条普通链接、`pending_links` 条尚未交给接收流程的分享链接时应显示的提示。
-pub(crate) fn share_note(entries: usize, pending_links: usize) -> Option<ShareNote> {
-    match (entries, pending_links) {
+/// `entries` 条普通链接、`pending` 条尚未交给接收流程的分享项（其中 `pending_codes` 个是取件码，
+/// 其余是分享链接）时应显示的提示。
+pub(crate) fn share_note(
+    entries: usize,
+    pending: usize,
+    pending_codes: usize,
+) -> Option<ShareNote> {
+    match (entries, pending) {
         (_, 0) => None,
-        (_, 1) if entries == 0 => Some(ShareNote::Link),
+        (0, 1) if pending_codes > 0 => Some(ShareNote::Code),
+        (0, 1) => Some(ShareNote::Link),
         (_, 1) => Some(ShareNote::Mixed),
         (_, count) => Some(ShareNote::Multiple(count)),
     }
@@ -640,7 +688,7 @@ mod tests {
     use super::{
         DraftOptions, ProxyChoice, ShareNote, ThreadChoice, UrlEntry, append_entries,
         build_requests, capture_entry, checksum_spec, custom_segments, detect_ua_preset,
-        manual_proxy_url, parse_entries, parse_input, share_note,
+        is_pickup_code, manual_proxy_url, parse_entries, parse_input, share_note,
     };
 
     #[test]
@@ -862,7 +910,7 @@ mod tests {
         ];
         let text = append_entries(existing, imported);
         assert_eq!(text, format!("{existing}\nhttps://b.example/b.zip"));
-        let parsed = parse_input(&text, false);
+        let parsed = parse_input(&text, false, 0);
         assert_eq!(parsed.hints.cookie, "sid=abc");
         let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
         assert_eq!(
@@ -983,7 +1031,7 @@ mod tests {
     }
 
     fn share_links(text: &str, loose: bool) -> Vec<String> {
-        parse_input(text, loose).share_links
+        parse_input(text, loose, 0).share_links
     }
 
     #[test]
@@ -996,16 +1044,16 @@ mod tests {
             "FLUXDOWN://share/abc",
             "https://fluxdown.zerx.dev/s/abc",
         ] {
-            let parsed = parse_input(link, false);
+            let parsed = parse_input(link, false, 0);
             assert!(parsed.entries.is_empty(), "{link:?}");
             assert_eq!(parsed.share_links, [link.trim()], "{link:?}");
         }
         // 同一主机上的其他路径是普通链接，不是分享。
-        let parsed = parse_input("https://fluxdown.com/download/x.zip", false);
+        let parsed = parse_input("https://fluxdown.com/download/x.zip", false, 0);
         assert_eq!(parsed.entries.len(), 1);
         assert!(parsed.share_links.is_empty());
         // slug 含非法字符 / 为空：不是分享链接。
-        let parsed = parse_input("https://fluxdown.com/s/a$b", false);
+        let parsed = parse_input("https://fluxdown.com/s/a$b", false, 0);
         assert_eq!(parsed.entries.len(), 1);
         assert!(parsed.share_links.is_empty());
         assert!(share_links("fluxdown://share/", false).is_empty());
@@ -1014,7 +1062,7 @@ mod tests {
     #[test]
     fn mixed_batches_split_share_links_from_ordinary_entries() {
         let text = "https://a.example/one.zip\nhttps://fluxdown.com/s/abc\n  out=ignored.bin\nmagnet:?xt=urn:btih:xyz\nfluxdown://share/def\nhttps://fluxdown.com/s/abc";
-        let parsed = parse_input(text, false);
+        let parsed = parse_input(text, false, 0);
         let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
         assert_eq!(
             urls,
@@ -1030,7 +1078,7 @@ mod tests {
 
     #[test]
     fn indented_share_links_are_links_not_option_lines() {
-        let parsed = parse_input("https://a.example/a\n  fluxdown://share/x\n", false);
+        let parsed = parse_input("https://a.example/a\n  fluxdown://share/x\n", false, 0);
         assert_eq!(parsed.entries.len(), 1);
         assert_eq!(parsed.share_links, ["fluxdown://share/x"]);
     }
@@ -1050,12 +1098,75 @@ mod tests {
     }
 
     #[test]
-    fn share_note_follows_pending_links() {
-        assert_eq!(share_note(3, 0), None);
-        assert_eq!(share_note(0, 0), None);
-        assert_eq!(share_note(0, 1), Some(ShareNote::Link));
-        assert_eq!(share_note(2, 1), Some(ShareNote::Mixed));
-        assert_eq!(share_note(0, 3), Some(ShareNote::Multiple(3)));
-        assert_eq!(share_note(5, 2), Some(ShareNote::Multiple(2)));
+    fn pickup_codes_are_recognised_after_stripping_separators() {
+        for text in ["123456", "123 456", "123-456", "  123456  ", "1-2 3\t4-5 6"] {
+            let parsed = parse_input(text, false, 6);
+            assert!(parsed.entries.is_empty(), "{text:?}");
+            assert_eq!(parsed.share_links, ["123456"], "{text:?}");
+        }
+        // 长度 0（云端未下发）按默认 6 位。
+        assert_eq!(parse_input("123456", false, 0).share_links, ["123456"]);
+        // 云端配置了其他位数时按该位数识别。
+        assert_eq!(parse_input("1234 5678", false, 8).share_links, ["12345678"]);
+        assert!(parse_input("123456", false, 8).share_links.is_empty());
+    }
+
+    #[test]
+    fn wrong_length_or_decorated_numbers_are_not_pickup_codes() {
+        for text in [
+            "12345",
+            "1234567",
+            "12 34 5",
+            "123456 note",
+            "code 123456",
+            "12345a",
+            "１２３４５６",
+            "123.456",
+            "-",
+            "",
+        ] {
+            let parsed = parse_input(text, false, 0);
+            assert!(parsed.share_links.is_empty(), "{text:?}");
+            assert!(parsed.entries.is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn pickup_codes_mix_with_links_and_dedupe_by_digits() {
+        let text = "https://a.example/one.zip\n123 456\nfluxdown://share/def\n123-456\n  654321\nmagnet:?xt=urn:btih:xyz";
+        let parsed = parse_input(text, false, 6);
+        let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://a.example/one.zip", "magnet:?xt=urn:btih:xyz"]
+        );
+        assert_eq!(
+            parsed.share_links,
+            ["123456", "fluxdown://share/def", "654321"]
+        );
+        // 缩进的取件码不是 `out=` / `checksum=` 选项行，也不附着到前一条普通链接。
+        assert_eq!(parsed.entries[0].file_name, "");
+    }
+
+    #[test]
+    fn pickup_code_items_are_told_apart_from_links() {
+        assert!(is_pickup_code("123456"));
+        assert!(!is_pickup_code(""));
+        assert!(!is_pickup_code("fluxdown://share/abc"));
+        assert!(!is_pickup_code("https://fluxdown.com/s/123456"));
+    }
+
+    #[test]
+    fn share_note_follows_pending_share_items() {
+        assert_eq!(share_note(3, 0, 0), None);
+        assert_eq!(share_note(0, 0, 0), None);
+        assert_eq!(share_note(0, 1, 0), Some(ShareNote::Link));
+        assert_eq!(share_note(0, 1, 1), Some(ShareNote::Code));
+        assert_eq!(share_note(2, 1, 0), Some(ShareNote::Mixed));
+        assert_eq!(share_note(2, 1, 1), Some(ShareNote::Mixed));
+        assert_eq!(share_note(0, 3, 0), Some(ShareNote::Multiple(3)));
+        // 取件码与链接一起计数。
+        assert_eq!(share_note(0, 2, 1), Some(ShareNote::Multiple(2)));
+        assert_eq!(share_note(5, 2, 2), Some(ShareNote::Multiple(2)));
     }
 }

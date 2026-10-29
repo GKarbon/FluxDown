@@ -1,21 +1,27 @@
-//! 「我的分享」页签：分享列表、行内操作（复制链接 / 二维码 / 停止）。
+//! 「我的分享」列表：行内操作（复制链接 / 二维码 / 停止·删除 / 更多）、批量条与空态。
 
 use std::ops::Range;
 
 use fluxdown_protocol::{ShareDto, ShareStatus};
 use fluxdown_ui_components::{
-    ButtonVariant, ControlExt as _, DialogIntent, FluxIcon, icon_button, tabular_numbers,
+    ButtonVariant, ControlExt as _, DialogIntent, FluxIcon, IconControlExt as _, icon_button,
+    tabular_numbers,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    App, ClipboardItem, Context, Div, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, uniform_list,
+    Anchor, App, ClipboardItem, Context, Div, ElementId, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, uniform_list,
 };
 use gpui_component::{
-    Disableable as _, Icon, WindowExt as _, button::Button, checkbox::Checkbox, h_flex,
-    notification::Notification, v_flex,
+    Disableable as _, Icon, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
+    h_flex,
+    menu::{DropdownMenu as _, PopupMenuItem},
+    notification::Notification,
+    v_flex,
 };
 
 use super::{
@@ -32,8 +38,8 @@ use crate::{
     },
     model::{
         AppealUi, PanelTarget, ShareAction, appeal_state, batch_actions, claimed_summary,
-        cloud::{CloudPhase, cloud_actions, method_label},
-        format_bytes, format_datetime, format_percent, is_editable, ordered_shares, share_headline,
+        cloud::{CloudPhase, cloud_actions},
+        format_bytes, format_datetime, is_editable, ordered_shares, share_headline,
         share_status_key, source_missing_badge,
     },
     qr::open_share_qr,
@@ -326,10 +332,7 @@ impl ShareView {
             .child(self.header_row(
                 vec![
                     (text(translator, "shareColFile"), None),
-                    (text(translator, "shareColMethod"), Some(cols.method)),
-                    (text(translator, "shareColExpiry"), Some(cols.expiry)),
                     (text(translator, "shareColClaims"), Some(cols.claims)),
-                    (text(translator, "shareColLastAccess"), Some(cols.access)),
                     (text(translator, "shareColStatus"), Some(cols.status)),
                 ],
                 cols.share_actions,
@@ -382,7 +385,6 @@ impl ShareView {
         let busy = self.busy.contains(&share.id);
         let selecting = !self.selected.is_empty();
         let checked = self.selected.contains(&share.id);
-        let can_start = ShareAction::Start.applies(&share);
         let headline = or_placeholder(share_headline(&share));
         let row_id = |part: &str| {
             ElementId::NamedInteger(
@@ -391,12 +393,17 @@ impl ShareView {
             )
         };
 
+        // 副行：文件数 · 大小 · 到期时间 [· 活动接收方]。
         let files = text_with(
             translator,
             "shareFilesCount",
             &[("count", &share.files.len().to_string())],
         );
         let mut meta = vec![files.to_string(), format_bytes(share.total_bytes)];
+        let expires = format_datetime(&share.expires_at);
+        if !expires.trim().is_empty() {
+            meta.push(expires);
+        }
         if !share.active_receivers.is_empty() {
             meta.push(
                 text_with(
@@ -407,28 +414,12 @@ impl ShareView {
                 .to_string(),
             );
         }
-        let label = method_label(&share);
-        let mut method_text = translator.text(label.mode_key).to_owned();
-        if let Some(key) = label.state_key {
-            method_text.push_str(" · ");
-            method_text.push_str(translator.text(key));
-        }
-        if let Some(percent) = label.percent {
-            method_text.push(' ');
-            method_text.push_str(&format_percent(f64::from(percent) / 100.));
-        }
-        let method = SharedString::from(method_text);
         let (claimed_key, claimed, max) = claimed_summary(share.claim_count, share.max_claims);
         let claims = text_with(
             translator,
             claimed_key,
             &[("count", &claimed.to_string()), ("max", &max.to_string())],
         );
-        let last_access = share.last_accessed_at.as_deref().map_or_else(
-            || text(translator, "shareNever"),
-            |at| SharedString::from(format_datetime(at)),
-        );
-        let expires = or_placeholder(&format_datetime(&share.expires_at));
         let (status_label, status_tone) = if source_missing_badge(&share) {
             (
                 text(translator, "shareStatusSourceMissing"),
@@ -452,88 +443,19 @@ impl ShareView {
         let copy_label = text(translator, "shareCopyLink");
         let qr_label = text(translator, "shareShowQr");
         let stop_label = text(translator, "shareStop");
-        let start_label = text(translator, "shareActionStart");
-        let start_tip = if share.source_missing {
-            text(translator, "shareStartDisabledMissing")
-        } else {
-            start_label.clone()
-        };
         let delete_label = text(translator, "shareActionDelete");
         let (copy_url, qr_url, qr_title) = (share.url.clone(), share.url.clone(), headline.clone());
-        let (open_id, stop_id) = (share.id.clone(), share.id.clone());
-        let (start_id, delete_id, select_id) =
-            (share.id.clone(), share.id.clone(), share.id.clone());
+        let (open_id, stop_id, delete_id, select_id) = (
+            share.id.clone(),
+            share.id.clone(),
+            share.id.clone(),
+            share.id.clone(),
+        );
         let hub_translator = self.translator.clone();
-        let cloud = {
-            let hub = self.hub.read(cx);
-            cloud_actions(
-                &share,
-                &hub.state().policy_summary,
-                hub.signed_in(),
-                hub.can_send(),
-            )
-        };
-        let cloud_button = if let Some(block) = cloud.convert {
-            let label = text(
-                translator,
-                if cloud.phase == CloudPhase::Failed {
-                    "shareStageRetry"
-                } else {
-                    "shareStageConvert"
-                },
-            );
-            let tip = block.map_or_else(|| label.clone(), |block| text(translator, block.key()));
-            let (hub_entity, id) = (self.hub.clone(), share.id.clone());
-            icon_button(
-                row_id("cloud"),
-                label,
-                Icon::new(FluxIcon::CloudUpload).size(icon_size),
-                ButtonVariant::Ghost,
-                cx,
-            )
-            .tooltip(tooltip_builder(tip))
-            .disabled(block.is_some() || stale)
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                open_convert_dialog(&hub_entity, id.clone(), window, cx);
-            })
-            .into_any_element()
-        } else if cloud.delete {
-            let uploading = cloud.phase.has_upload();
-            let label = text(
-                translator,
-                if uploading {
-                    "shareStageCancelUpload"
-                } else {
-                    "shareStageDelete"
-                },
-            );
-            let (hub_entity, id) = (self.hub.clone(), share.id.clone());
-            icon_button(
-                row_id("cloud"),
-                label.clone(),
-                Icon::new(FluxIcon::Trash2).size(icon_size),
-                ButtonVariant::Ghost,
-                cx,
-            )
-            .tooltip(tooltip_builder(label))
-            .disabled(stale)
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                confirm_delete_cloud_copy(&hub_entity, id.clone(), uploading, window, cx);
-            })
-            .into_any_element()
-        } else {
-            // 没有云端动作时留出按钮位，保持图标列对齐。
-            div()
-                .w(theme.density().control)
-                .flex_none()
-                .into_any_element()
-        };
 
-        // 行内第 4、5 个按钮位：有效分享 = 空位 + 停止；其余 = 开始 + 删除。
-        let (slot_start, slot_end) = if editable {
-            let stop_button = icon_button(
+        // 有效分享 = 停止；其余 = 删除。
+        let stop_or_delete = if editable {
+            icon_button(
                 row_id("stop"),
                 stop_label.clone(),
                 Icon::new(FluxIcon::X)
@@ -548,16 +470,8 @@ impl ShareView {
                 cx.stop_propagation();
                 this.confirm_stop(stop_id.clone(), window, cx);
             }))
-            .into_any_element();
-            (
-                div()
-                    .w(theme.density().control)
-                    .flex_none()
-                    .into_any_element(),
-                stop_button,
-            )
         } else {
-            let delete_button = icon_button(
+            icon_button(
                 row_id("delete"),
                 delete_label.clone(),
                 Icon::new(FluxIcon::Trash2)
@@ -572,72 +486,71 @@ impl ShareView {
                 cx.stop_propagation();
                 this.confirm_delete(vec![delete_id.clone()], window, cx);
             }))
-            .into_any_element();
-            let first = match appeal_state(&share) {
-                AppealUi::CanAppeal => {
-                    let label = text(translator, "shareAppeal");
-                    let (hub_entity, id) = (self.hub.clone(), share.id.clone());
-                    icon_button(
-                        row_id("appeal"),
-                        label.clone(),
-                        Icon::new(FluxIcon::FileText).size(icon_size),
-                        ButtonVariant::Ghost,
-                        cx,
-                    )
-                    .tooltip(tooltip_builder(label))
-                    .disabled(stale || busy)
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        open_appeal_dialog(&hub_entity, id.clone(), window, cx);
-                    })
-                    .into_any_element()
-                }
-                // 处理中 / 未通过：弱化的状态图标（位宽只容得下一个按钮，全文在悬浮提示里）。
-                state @ (AppealUi::Pending | AppealUi::Rejected) => {
-                    let (key, icon) = if state == AppealUi::Pending {
-                        ("shareAppealPending", FluxIcon::Clock)
-                    } else {
-                        ("shareAppealRejected", FluxIcon::CircleAlert)
-                    };
-                    let label = text(translator, key);
-                    h_flex()
-                        .id(row_id("appeal-state"))
-                        .w(theme.density().control)
-                        .flex_none()
-                        .justify_center()
-                        .child(
-                            Icon::new(icon)
-                                .size(icon_size)
-                                .text_color(theme.extended().colors.text_tertiary),
-                        )
-                        .tooltip(tooltip_builder(label))
-                        .into_any_element()
-                }
-                AppealUi::None => {
-                    if share.status == ShareStatus::Takedown {
-                        div()
-                            .w(theme.density().control)
-                            .flex_none()
-                            .into_any_element()
-                    } else {
-                        icon_button(
-                            row_id("start"),
-                            start_label,
-                            Icon::new(FluxIcon::Play).size(icon_size),
-                            ButtonVariant::Ghost,
-                            cx,
-                        )
-                        .tooltip(tooltip_builder(start_tip))
-                        .disabled(!can_start || stale || busy)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.run_action(ShareAction::Start, vec![start_id.clone()], window, cx);
-                        }))
-                        .into_any_element()
-                    }
-                }
-            };
-            (first, delete_button)
+        };
+
+        let more_items = self.more_items(&share, translator, stale || busy, cx);
+        let more_button = if more_items.is_empty() {
+            // 没有可用项时留出按钮位，保持图标列对齐。
+            div()
+                .w(theme.density().control)
+                .flex_none()
+                .into_any_element()
+        } else {
+            let label = text(translator, "moreActions");
+            let (hub, view, id) = (self.hub.clone(), cx.weak_entity(), share.id.clone());
+            // 外包一层吞掉点击冒泡：菜单触发不应同时打开分享面板。
+            div()
+                .id(row_id("more-wrap"))
+                .flex_none()
+                .tooltip(tooltip_builder(label))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new(row_id("more"))
+                        .ghost()
+                        .icon(Icon::new(FluxIcon::Ellipsis).size(icon_size))
+                        .control_icon(cx)
+                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                            more_items.iter().fold(menu, |menu, item| {
+                                let mut entry = PopupMenuItem::new(item.label.clone())
+                                    .disabled(item.disabled || item.action.is_none());
+                                if let Some(action) = item.action {
+                                    let (hub, view, id) = (hub.clone(), view.clone(), id.clone());
+                                    entry = entry.on_click(move |_, window, cx| match action {
+                                        MoreAction::ConvertCloud => {
+                                            open_convert_dialog(&hub, id.clone(), window, cx);
+                                        }
+                                        MoreAction::DeleteCloudCopy { uploading } => {
+                                            confirm_delete_cloud_copy(
+                                                &hub,
+                                                id.clone(),
+                                                uploading,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                        MoreAction::Appeal => {
+                                            open_appeal_dialog(&hub, id.clone(), window, cx);
+                                        }
+                                        MoreAction::Start => {
+                                            let Ok(()) = view.update(cx, |this, cx| {
+                                                this.run_action(
+                                                    ShareAction::Start,
+                                                    vec![id.clone()],
+                                                    window,
+                                                    cx,
+                                                );
+                                            }) else {
+                                                // 分享页已释放。
+                                                return;
+                                            };
+                                        }
+                                    });
+                                }
+                                menu.item(entry)
+                            })
+                        }),
+                )
+                .into_any_element()
         };
 
         let group = SharedString::from(format!("share-mine-group-{index}"));
@@ -687,14 +600,7 @@ impl ShareView {
                     .child(body_text(cx).child(clipped(row_id("title"), headline)))
                     .child(meta_text(cx).child(clipped(row_id("meta"), meta.join(" · ")))),
             )
-            .child(cell(cols.method, method, row_id("method")))
-            .child(cell(
-                cols.expiry,
-                SharedString::from(expires),
-                row_id("expiry"),
-            ))
             .child(cell(cols.claims, claims, row_id("claims")))
-            .child(cell(cols.access, last_access, row_id("access")))
             .child(h_flex().w(cols.status).flex_none().min_w_0().child(status))
             .child(
                 h_flex()
@@ -734,9 +640,115 @@ impl ShareView {
                             open_share_qr(&hub_translator, &qr_title, &qr_url, window, cx);
                         }),
                     )
-                    .child(cloud_button)
-                    .child(slot_start)
-                    .child(slot_end),
+                    .child(stop_or_delete)
+                    .child(more_button),
             )
     }
+
+    /// 行尾「更多」菜单的条目：云端转存 / 删除云端副本、申诉（或申诉状态）、重新开始。
+    /// `locked` = 与 agent 断开或该分享正在提交操作。
+    fn more_items(
+        &self,
+        share: &ShareDto,
+        translator: &Translator,
+        locked: bool,
+        cx: &App,
+    ) -> Vec<MoreItem> {
+        let mut items = Vec::new();
+        let cloud = {
+            let hub = self.hub.read(cx);
+            cloud_actions(
+                share,
+                &hub.state().policy_summary,
+                hub.signed_in(),
+                hub.can_send(),
+            )
+        };
+        if let Some(block) = cloud.convert {
+            let label = text(
+                translator,
+                if cloud.phase == CloudPhase::Failed {
+                    "shareStageRetry"
+                } else {
+                    "shareStageConvert"
+                },
+            );
+            let label = block.map_or_else(
+                || label.clone(),
+                |block| SharedString::from(format!("{label} · {}", translator.text(block.key()))),
+            );
+            items.push(MoreItem {
+                label,
+                disabled: block.is_some() || locked,
+                action: Some(MoreAction::ConvertCloud),
+            });
+        } else if cloud.delete {
+            let uploading = cloud.phase.has_upload();
+            items.push(MoreItem {
+                label: text(
+                    translator,
+                    if uploading {
+                        "shareStageCancelUpload"
+                    } else {
+                        "shareStageDelete"
+                    },
+                ),
+                disabled: locked,
+                action: Some(MoreAction::DeleteCloudCopy { uploading }),
+            });
+        }
+        if is_editable(share) {
+            return items;
+        }
+        match appeal_state(share) {
+            AppealUi::CanAppeal => items.push(MoreItem {
+                label: text(translator, "shareAppeal"),
+                disabled: locked,
+                action: Some(MoreAction::Appeal),
+            }),
+            // 处理中 / 未通过：只作状态展示（不可点）。
+            state @ (AppealUi::Pending | AppealUi::Rejected) => items.push(MoreItem {
+                label: text(
+                    translator,
+                    if state == AppealUi::Pending {
+                        "shareAppealPending"
+                    } else {
+                        "shareAppealRejected"
+                    },
+                ),
+                disabled: true,
+                action: None,
+            }),
+            AppealUi::None if share.status != ShareStatus::Takedown => items.push(MoreItem {
+                label: text(
+                    translator,
+                    if share.source_missing {
+                        "shareStartDisabledMissing"
+                    } else {
+                        "shareActionStart"
+                    },
+                ),
+                disabled: !ShareAction::Start.applies(share) || locked,
+                action: Some(MoreAction::Start),
+            }),
+            AppealUi::None => {}
+        }
+        items
+    }
+}
+
+/// 「更多」菜单里的动作。
+#[derive(Clone, Copy)]
+enum MoreAction {
+    ConvertCloud,
+    DeleteCloudCopy { uploading: bool },
+    Appeal,
+    Start,
+}
+
+/// 「更多」菜单的一个条目；`action` 为空 = 只读状态行。
+struct MoreItem {
+    label: SharedString,
+    disabled: bool,
+    action: Option<MoreAction>,
 }

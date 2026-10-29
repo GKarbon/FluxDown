@@ -1,4 +1,4 @@
-//! 「我的分享」与「接收记录」两张表共用的列宽、行高与表头。
+//! 「我的分享」表的列宽、行高与表头。
 
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -11,30 +11,14 @@ use super::ShareView;
 use crate::manage_ui::meta_text;
 
 /// 列宽（默认字号下的 px，随字体缩放）。
-pub(super) const COL_METHOD: f32 = 152.;
-pub(super) const COL_EXPIRY: f32 = 128.;
 pub(super) const COL_CLAIMS: f32 = 112.;
-pub(super) const COL_ACCESS: f32 = 128.;
 pub(super) const COL_STATUS: f32 = 92.;
-pub(super) const COL_SENDER: f32 = 144.;
-pub(super) const COL_FILES: f32 = 80.;
-pub(super) const COL_SIZE: f32 = 88.;
-pub(super) const COL_STARTED: f32 = 128.;
-pub(super) const COL_PROVIDE: f32 = 136.;
 
 /// 列宽集合。
 pub(super) struct Columns {
-    pub(super) method: Pixels,
-    pub(super) expiry: Pixels,
     pub(super) claims: Pixels,
-    pub(super) access: Pixels,
     pub(super) status: Pixels,
-    pub(super) sender: Pixels,
-    pub(super) files: Pixels,
-    pub(super) size: Pixels,
-    pub(super) started: Pixels,
-    pub(super) provide: Pixels,
-    /// 「我的分享」行内按钮：复制 / 二维码 / 云端 / 开始·停止 / 删除，五个图标按钮 + 间距。
+    /// 行内按钮：复制 / 二维码 / 停止·删除 / 更多，四个图标按钮 + 间距。
     pub(super) share_actions: Pixels,
     /// 行首复选框列。
     pub(super) select: Pixels,
@@ -44,17 +28,9 @@ pub(super) fn columns(cx: &App) -> Columns {
     let theme = active_theme(cx);
     let spacing = theme.tokens().spacing;
     Columns {
-        method: theme.text_extent(COL_METHOD),
-        expiry: theme.text_extent(COL_EXPIRY),
         claims: theme.text_extent(COL_CLAIMS),
-        access: theme.text_extent(COL_ACCESS),
         status: theme.text_extent(COL_STATUS),
-        sender: theme.text_extent(COL_SENDER),
-        files: theme.text_extent(COL_FILES),
-        size: theme.text_extent(COL_SIZE),
-        started: theme.text_extent(COL_STARTED),
-        provide: theme.text_extent(COL_PROVIDE),
-        share_actions: theme.density().control * 5. + spacing.xxs * 4.,
+        share_actions: theme.density().control * 4. + spacing.xxs * 3.,
         select: theme.density().control,
     }
 }

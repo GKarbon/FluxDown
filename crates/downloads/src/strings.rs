@@ -176,6 +176,8 @@ pub(crate) struct DownloadStrings {
     pub(crate) conflict_pending_tooltip: SharedString,
     pub(crate) share: SharedString,
     pub(crate) share_switch_bridge: SharedString,
+    pub(crate) share_providing_badge: SharedString,
+    pub(crate) share_stop_providing: SharedString,
     pub(crate) share_swarm_quota_chip: SharedString,
     pub(crate) share_swarm_login_chip: SharedString,
     share_path_direct_lan: SharedString,
@@ -362,6 +364,8 @@ impl DownloadStrings {
             conflict_pending_tooltip: shared(translator.text("fileConflictPendingTooltip")),
             share: shared(translator.text("detailActionShare")),
             share_switch_bridge: shared(translator.text("shareSwitchBridge")),
+            share_providing_badge: shared(translator.text("shareProvidingBadge")),
+            share_stop_providing: shared(translator.text("shareStopProviding")),
             share_swarm_quota_chip: shared(translator.text("shareSwarmQuotaChip")),
             share_swarm_login_chip: shared(translator.text("shareSwarmLoginChip")),
             share_path_direct_lan: shared(translator.text("sharePathDirectLan")),
@@ -743,6 +747,7 @@ pub(crate) struct NewDownloadStrings {
     share_link_note: SharedString,
     share_mixed_note: SharedString,
     share_multiple_note: SharedString,
+    share_code_note: SharedString,
     pub(crate) share_unavailable_note: SharedString,
     pub(crate) open_torrent: SharedString,
     pub(crate) select_torrent: SharedString,
@@ -850,6 +855,7 @@ impl NewDownloadStrings {
             share_link_note: shared(translator.text("shareNewDownloadLink")),
             share_mixed_note: shared(translator.text("shareNewDownloadMixed")),
             share_multiple_note: shared(translator.text("shareNewDownloadMultiple")),
+            share_code_note: shared(translator.text("shareNewDownloadCode")),
             share_unavailable_note: shared(translator.text("shareNewDownloadUnavailable")),
             open_torrent: shared(translator.text("openTorrentFile")),
             select_torrent: shared(translator.text("selectTorrentFile")),
@@ -971,6 +977,7 @@ impl NewDownloadStrings {
         use crate::model::new_download::ShareNote;
         match note {
             ShareNote::Link => self.share_link_note.clone(),
+            ShareNote::Code => self.share_code_note.clone(),
             ShareNote::Mixed => self.share_mixed_note.clone(),
             ShareNote::Multiple(count) => SharedString::from(
                 self.share_multiple_note

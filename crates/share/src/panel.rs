@@ -40,7 +40,7 @@ use crate::{
     hub::ShareHub,
     manage_ui::chip,
     model::{
-        ManageTab, NetHealth, NetSegment, PanelTarget, claimed_summary, claims_label,
+        NetHealth, NetSegment, PanelTarget, claimed_summary, claims_label,
         cloud::{CloudPhase, UploadLine, cloud_actions, expiry_tiers, retry_tier, upload_line},
         format_bytes, format_datetime, format_pickup_code, format_rate, nat_key, net_health,
         net_segments,
@@ -303,16 +303,19 @@ impl SharePanelView {
         window.push_notification(Notification::success(message), cx);
     }
 
-    fn open_manage(
-        &self,
-        tab: ManageTab,
-        session_id: Option<String>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    /// 切到分享页。
+    fn open_manage(&self, window: &mut Window, cx: &mut App) {
         let open = self.hub.read(cx).host().open_manage.clone();
         if let Some(open) = open {
-            open(tab, session_id, window, cx);
+            open(window, cx);
+        }
+    }
+
+    /// 打开设置 › FluxMesh › 网络诊断并聚焦某个会话。
+    fn open_diagnostics(&self, session_id: Option<String>, window: &mut Window, cx: &mut App) {
+        let open = self.hub.read(cx).host().open_diagnostics.clone();
+        if let Some(open) = open {
+            open(session_id, window, cx);
         }
     }
 }
@@ -675,7 +678,7 @@ impl SharePanelView {
                     .label(text(translator, "shareManageAll"))
                     .control(cx)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_manage(ManageTab::Mine, None, window, cx);
+                        this.open_manage(window, cx);
                         window.remove_window();
                     })),
             )
@@ -1237,8 +1240,7 @@ impl SharePanelView {
                                 .label(text(translator, "shareDiagnose"))
                                 .control(cx)
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_manage(
-                                        ManageTab::Network,
+                                    this.open_diagnostics(
                                         Some(diagnose_session.clone()),
                                         window,
                                         cx,
@@ -1406,7 +1408,7 @@ impl Render for SharePanelView {
                                 .label(text(translator, "shareManageAll"))
                                 .control(cx)
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_manage(ManageTab::Mine, None, window, cx);
+                                    this.open_manage(window, cx);
                                     window.remove_window();
                                 })),
                         )

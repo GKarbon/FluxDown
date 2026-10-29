@@ -425,6 +425,21 @@ pub fn is_noop(current: &ShareLocalConfigDto, next: &ShareLocalConfigDto) -> boo
     normalized(current) == normalized(next)
 }
 
+/// 提交前的收尾（设置页与分享页摘要的开关共用）：与底稿相比是 no-op 返回 `None`；否则带上本地
+/// UTC 偏移（每日上限按本地时区自然日划分，每次提交都要带，所以不参与 no-op 判定）。
+#[must_use]
+pub fn prepare_commit(
+    shown: &ShareLocalConfigDto,
+    mut next: ShareLocalConfigDto,
+    local_offset_secs: i32,
+) -> Option<ShareLocalConfigDto> {
+    if is_noop(shown, &next) {
+        return None;
+    }
+    next.provide_day_offset_secs = Some(local_offset_secs);
+    Some(next)
+}
+
 /// 文本输入解析后的结果：能解析的字段给出新值，不能解析的保持底稿并记入错误。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextEdits {
@@ -813,6 +828,26 @@ mod tests {
         swarm.default_swarm = None;
         swarm.auto_provide = Some(false);
         assert!(!is_noop(&base(), &swarm));
+    }
+
+    #[test]
+    fn prepare_commit_skips_noops_and_stamps_the_local_offset() {
+        let mut on = base();
+        on.auto_provide = Some(true);
+        // 缺省即开：改成显式开是 no-op。
+        assert!(prepare_commit(&base(), on, 28_800).is_none());
+
+        let mut off = base();
+        off.auto_provide = Some(false);
+        let committed = prepare_commit(&base(), off, -18_000);
+        assert_eq!(
+            committed.as_ref().map(|config| config.auto_provide),
+            Some(Some(false))
+        );
+        assert_eq!(
+            committed.and_then(|config| config.provide_day_offset_secs),
+            Some(-18_000)
+        );
     }
 
     #[test]

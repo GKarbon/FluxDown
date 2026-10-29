@@ -64,7 +64,7 @@ impl DownloadView {
         }
     }
 
-    /// 任务行角标上的「额度已用完 / 需登录」chip：打开管理页额度页签。
+    /// 任务行角标上的「额度已用完 / 需登录」chip：打开设置 › 账户的额度。
     pub(crate) fn share_open_usage(
         &self,
         task_id: String,
@@ -73,6 +73,27 @@ impl DownloadView {
     ) {
         if let Some(open) = self.host.share_open_usage.clone() {
             open(task_id, window, cx);
+        }
+    }
+
+    /// 任务右键「停止共享」：按任务当前事实取接收记录 ID 交给宿主；记录已不在共享时什么也不做。
+    pub(crate) fn share_stop_providing(
+        &self,
+        task_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(stop) = self.host.share_stop_providing.clone() else {
+            return;
+        };
+        let record_id = self
+            .controller
+            .store()
+            .share()
+            .providing_record(task_id)
+            .map(str::to_owned);
+        if let Some(record_id) = record_id {
+            stop(record_id, window, cx);
         }
     }
 

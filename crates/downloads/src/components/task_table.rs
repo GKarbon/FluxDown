@@ -455,6 +455,8 @@ pub(crate) struct TaskMenuFacts {
     pub(crate) share_visible: bool,
     /// 本机当前可发起分享（已登录，或云端允许游客发起）。
     pub(crate) share_can_send: bool,
+    /// 「停止共享」可用：宿主提供了入口，且该任务所属接收记录仍在共享（有记录 ID）。
+    pub(crate) stop_providing: bool,
 }
 
 /// 可「忽略插件重试」的插件失败错误消息前缀（引擎 `handle_resolve_ready`；二段解析任务
@@ -543,6 +545,9 @@ pub(crate) fn task_menu_facts_for(store: &TaskStore, key: &RowKey) -> Option<Tas
         can_resume_seeding: row.can_resume_seeding(),
         share_visible: store.share_entry_visible(),
         share_can_send: store.share().can_send(),
+        stop_providing: key.is_local()
+            && store.share_host().stop_providing
+            && store.share().providing_record(key.task_id()).is_some(),
     })
 }
 
@@ -567,6 +572,8 @@ pub(crate) enum MenuEntry {
     VerifyIntegrity,
     /// 分享选中的已完成任务（`None` = 可点击；`Some(原因)` = 禁用并提示原因）。
     Share(Option<ShareBlock>),
+    /// 停止共享已接收的文件（单选；条件见 [`TaskMenuFacts::stop_providing`]）。
+    StopProviding,
     Redownload,
     CopyUrl,
     MoveToQueue,
@@ -661,6 +668,11 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
         if control.is_visible() {
             items.push(MenuEntry::Share(control.block()));
         }
+    }
+    if let [only] = selection
+        && only.stop_providing
+    {
+        items.push(MenuEntry::StopProviding);
     }
     items.push(MenuEntry::CopyUrl);
     if selection.iter().all(|task| task.is_local) {
@@ -2859,6 +2871,27 @@ impl DownloadTableDelegate {
                     })
                     .icon(FluxIcon::Share2)
                     .disabled(true),
+                )
+            }
+            MenuEntry::StopProviding => {
+                let (Some(host), Some(task_id)) = (
+                    self.host.clone(),
+                    selected.first().map(|key| key.task_id().to_owned()),
+                ) else {
+                    return menu;
+                };
+                menu.item(
+                    PopupMenuItem::new(self.strings.share_stop_providing.clone())
+                        .icon(FluxIcon::Share2)
+                        .on_click(move |_, window, cx| {
+                            let task_id = task_id.clone();
+                            let Ok(()) = host.update(cx, |view, cx| {
+                                view.share_stop_providing(&task_id, window, cx);
+                            }) else {
+                                // 视图已释放，结束这次回调而不再更新状态。
+                                return;
+                            };
+                        }),
                 )
             }
             MenuEntry::CopyUrl => menu.menu_with_icon(
@@ -5688,6 +5721,7 @@ mod context_menu_tests {
             can_resume_seeding: false,
             share_visible: false,
             share_can_send: true,
+            stop_providing: false,
         }
     }
 
@@ -5701,6 +5735,30 @@ mod context_menu_tests {
             share_visible: true,
             ..task(is_local, state)
         }
+    }
+
+    #[test]
+    fn stop_providing_entry_needs_a_single_providing_task() {
+        let providing = TaskMenuFacts {
+            stop_providing: true,
+            ..task(true, TaskState::Completed)
+        };
+        let has_entry = |selection: &[TaskMenuFacts]| {
+            task_menu_entries(selection, false, 0).contains(&MenuEntry::StopProviding)
+        };
+        assert!(has_entry(&[providing]));
+        // 宿主未注入入口 / 记录已不在共享：事实为 false，不出现。
+        assert!(!has_entry(&[task(true, TaskState::Completed)]));
+        // 多选不出现（即使每个任务都在共享）。
+        assert!(!has_entry(&[providing, providing]));
+        assert!(!has_entry(&[providing, task(true, TaskState::Completed)]));
+        // 与「分享」入口互不依赖：FluxMesh分享入口隐藏时仍可停止共享。
+        assert!(!providing.share_visible);
+        assert!(
+            !task_menu_entries(&[providing], false, 0)
+                .iter()
+                .any(|entry| matches!(entry, MenuEntry::Share(_)))
+        );
     }
 
     #[test]

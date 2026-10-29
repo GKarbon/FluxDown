@@ -68,14 +68,23 @@ pub(crate) enum ReferralPage {
     Shown(Option<AnyView>),
 }
 
+/// 「FluxMesh」页的两个 Tab 槽位（构建页面列表时传入）。
+#[derive(Default)]
+pub(crate) struct ShareSlots {
+    pub(crate) general: Option<AnyView>,
+    pub(crate) network: Option<AnyView>,
+}
+
 /// app 注入的外部内容：账户 / 推介页与扩展页由对应 capability 提供；活动栏开关由 app 的
 /// 活动栏注册表派生。
 #[derive(Default)]
 pub struct SettingsContentSlots {
     pub account: Option<AnyView>,
     pub extensions: Option<AnyView>,
-    /// 「FluxMesh」页（通知之后、扩展之前）；内容由FluxMesh capability 提供。
+    /// 「FluxMesh」页（通知之后、扩展之前）「常规」Tab；内容由FluxMesh capability 提供。
     pub share: Option<AnyView>,
+    /// 「FluxMesh」页「网络诊断」Tab（占满高度、自管滚动）。
+    pub share_network: Option<AnyView>,
     /// 「推介有奖」页（账户之后）；不可见时整页不出现在侧栏、搜索与直达里。
     pub referral: Option<VisibleSlot>,
     /// 「通用 → 活动栏」分区的开关行，按活动栏自上而下顺序。
@@ -222,7 +231,10 @@ impl SettingsView {
             &ctx,
             &self.slots.activity_bar,
             self.slots.account.clone(),
-            self.slots.share.clone(),
+            ShareSlots {
+                general: self.slots.share.clone(),
+                network: self.slots.share_network.clone(),
+            },
             self.slots.extensions.clone(),
             match &self.slots.referral {
                 Some(slot) if slot.visible.read(cx).visible() => {
@@ -423,7 +435,7 @@ pub(crate) fn build_pages(
     ctx: &SectionContext,
     activity_bar: &[ActivityBarToggle],
     account: Option<AnyView>,
-    share: Option<AnyView>,
+    share: ShareSlots,
     extensions: Option<AnyView>,
     referral: ReferralPage,
     cx: &mut App,
@@ -461,14 +473,7 @@ pub(crate) fn build_pages(
         proxy::page(ctx, cx),
         api::page(ctx, cx),
         notify::page(ctx, cx),
-        sections::slot_page(
-            ctx,
-            "share",
-            "settingsCatShare",
-            "settingsCatShareDesc",
-            FluxIcon::Share2,
-            share,
-        ),
+        sections::share_page(ctx, share.general, share.network),
         sections::slot_page(
             ctx,
             "extensions",

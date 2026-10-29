@@ -1,4 +1,4 @@
-//! 「额度与贡献」页签的纯模型：封顶格式化、额度条、来源文案键、等级与加成标签。
+//! 额度与贡献的纯模型：封顶格式化、额度条、最受限额度、来源文案键、等级与加成标签。
 
 use fluxdown_protocol::{DISPLAY_BYTES_CAP, ShareGrantSource, ShareTrafficKind, ShareUsageDto};
 
@@ -70,6 +70,33 @@ pub fn meters(usage: &ShareUsageDto) -> Vec<MeterView> {
         .collect()
 }
 
+/// 剩余占月额度的比例 `0.0..=1.0`（含流量包等额外额度，超出月额度按 1 计）；月额度为 0 按 1 计。
+fn remaining_fraction(meter: &MeterView) -> f64 {
+    if meter.allowance == 0 {
+        1.
+    } else {
+        (meter.remaining as f64 / meter.allowance as f64).clamp(0., 1.)
+    }
+}
+
+/// 摘要行展示的「最受限」额度：已用完的优先（多个取先出现者）；否则取剩余占月额度比例最低的有限
+/// 额度（流量包让剩余超过月额度的不算紧张；平手取先出现者）；全部不限则取第一项（调用方按
+/// `unlimited` 显示「不限」）；空列表为 `None`。与 Web `usageSummaryLine` 同语义。
+#[must_use]
+pub fn most_constrained(meters: &[MeterView]) -> Option<&MeterView> {
+    if let Some(exhausted) = meters.iter().find(|meter| meter.exhausted) {
+        return Some(exhausted);
+    }
+    meters
+        .iter()
+        .filter(|meter| !meter.unlimited)
+        .fold(None::<&MeterView>, |best, meter| match best {
+            Some(best) if remaining_fraction(best) <= remaining_fraction(meter) => Some(best),
+            _ => Some(meter),
+        })
+        .or_else(|| meters.first())
+}
+
 /// 额度来源文案键；系统赠送（后台 / free）与未知来源共用 `shareUsageGrantGranted`。
 #[must_use]
 pub const fn grant_source_key(source: ShareGrantSource) -> &'static str {
@@ -115,7 +142,9 @@ mod tests {
         DISPLAY_BYTES_CAP, ShareGrantSource, ShareKindUsageDto, ShareTrafficKind, ShareUsageDto,
     };
 
-    use super::{boost_label, format_quota_bytes, grant_source_key, level_label, meters};
+    use super::{
+        boost_label, format_quota_bytes, grant_source_key, level_label, meters, most_constrained,
+    };
 
     fn kind(
         kind: ShareTrafficKind,
@@ -164,6 +193,71 @@ mod tests {
         assert!(views[1].ratio.abs() < f32::EPSILON);
         assert!(views[2].exhausted);
         assert!((views[2].ratio - 1.).abs() < f32::EPSILON);
+    }
+
+    fn usage_of(kinds: Vec<ShareKindUsageDto>) -> ShareUsageDto {
+        ShareUsageDto {
+            kinds,
+            ..ShareUsageDto::default()
+        }
+    }
+
+    #[test]
+    fn most_constrained_handles_empty_and_all_unlimited() {
+        assert!(most_constrained(&[]).is_none());
+        let views = meters(&usage_of(vec![
+            kind(ShareTrafficKind::Swarm, true, 0, 0, 0),
+            kind(ShareTrafficKind::Download, true, 0, 5, 0),
+        ]));
+        let picked = most_constrained(&views);
+        assert_eq!(
+            picked.map(|meter| meter.label_key),
+            Some("shareUsageKindSwarm")
+        );
+        assert!(picked.is_some_and(|meter| meter.unlimited));
+    }
+
+    #[test]
+    fn most_constrained_prefers_exhausted_then_lowest_remaining_ratio() {
+        let views = meters(&usage_of(vec![
+            kind(ShareTrafficKind::Swarm, false, 100, 25, 75),
+            kind(ShareTrafficKind::Download, true, 0, 0, 0),
+            kind(ShareTrafficKind::Upload, false, 100, 100, 0),
+        ]));
+        assert_eq!(
+            most_constrained(&views).map(|meter| meter.label_key),
+            Some("shareUsageKindUpload")
+        );
+
+        let views = meters(&usage_of(vec![
+            kind(ShareTrafficKind::Swarm, false, 100, 25, 75),
+            kind(ShareTrafficKind::Download, false, 100, 90, 10),
+            kind(ShareTrafficKind::Upload, true, 0, 0, 0),
+        ]));
+        assert_eq!(
+            most_constrained(&views).map(|meter| meter.label_key),
+            Some("shareUsageKindDownload")
+        );
+
+        // 占比相同取先出现者。
+        let views = meters(&usage_of(vec![
+            kind(ShareTrafficKind::Swarm, false, 100, 50, 50),
+            kind(ShareTrafficKind::Download, false, 200, 100, 100),
+        ]));
+        assert_eq!(
+            most_constrained(&views).map(|meter| meter.label_key),
+            Some("shareUsageKindSwarm")
+        );
+
+        // 流量包让剩余超过月额度：即使本月已用占比更高也不算最紧。
+        let views = meters(&usage_of(vec![
+            kind(ShareTrafficKind::Swarm, false, 100, 90, 500),
+            kind(ShareTrafficKind::Download, false, 100, 50, 50),
+        ]));
+        assert_eq!(
+            most_constrained(&views).map(|meter| meter.label_key),
+            Some("shareUsageKindDownload")
+        );
     }
 
     #[test]

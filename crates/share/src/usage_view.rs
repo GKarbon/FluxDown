@@ -1,60 +1,46 @@
-//! 管理页「额度与贡献」页签：三种流量的本月额度、额度明细、贡献等级与赚取、购买入口。
+//! 额度与贡献视图（嵌在设置 › 账户页滚动内容里）：三种流量的本月额度、额度明细、贡献等级与赚取。
 //!
-//! 数据来自 `ShareStateDto.usage`（agent 经云端推送 / 事件刷新）；本页签只在渲染（可见）时调用
-//! `agent.share.usageRefresh` 取最新值，hub 变化只重绘不取数，所以空闲时没有任何请求。
-
-use std::time::Instant;
+//! 数据来自 `ShareStateDto.usage`（agent 经云端推送 / 事件刷新）；视图只在渲染（可见）时经
+//! [`UsageSync`] 节流调用 `agent.share.usageRefresh`，hub 变化只重绘不取数，所以空闲时没有任何请求。
+//! 不自管滚动；未登录 / 暂无数据时渲染空元素（购买 / 升级 / 登录入口由账户页自己提供）。
 
 use fluxdown_protocol::{ShareTrafficKind, ShareUsageDto};
-use fluxdown_ui_components::{ButtonVariant, ControlExt as _, FluxIcon, card, loading_icon_button};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, card, loading_icon_button};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    prelude::FluentBuilder as _,
+    AnyElement, App, Context, Div, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    Icon,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    scroll::ScrollableElement as _,
-    v_flex,
-};
+use gpui_component::{Icon, h_flex, v_flex};
 
 use crate::{
     hub::ShareHub,
     manage_ui::{
-        body_text, chip, clipped, empty_state, meta_text, meter_row, section_header, text,
-        text_with, tooltip_builder,
+        body_text, chip, clipped, meta_text, meter_row, section_header, text, text_with,
+        tooltip_builder,
     },
     model::{
         format_datetime,
-        refresh::{GateAction, VisibleRefresh},
         usage::{boost_label, format_quota_bytes, grant_source_key, kind_key, level_label, meters},
     },
+    usage_sync::UsageSync,
 };
 
-/// 两次自动取数之间的最短间隔（毫秒）。
-const MIN_REFRESH_MS: u64 = 2_000;
 /// 明细表「剩余」「到期」列宽（默认字号下的 px）。
 const COL_REMAINING_WIDTH: f32 = 96.;
 const COL_EXPIRES_WIDTH: f32 = 128.;
 
-pub(super) struct UsageTab {
+/// 额度与贡献视图。
+pub struct ShareUsageView {
     hub: Entity<ShareHub>,
     translator: Entity<Translator>,
-    epoch: Instant,
-    refresh: VisibleRefresh,
-    request: u64,
-    loading: bool,
-    /// 至少完成过一次取数（区分「还没取」与「未登录」）。
-    loaded: bool,
-    failed: bool,
+    sync: UsageSync,
 }
 
-impl UsageTab {
-    pub(super) fn new(hub: Entity<ShareHub>, cx: &mut Context<Self>) -> Self {
+impl ShareUsageView {
+    /// 创建额度视图；`hub` 是跨窗口共享的FluxMesh状态。
+    pub fn new(hub: Entity<ShareHub>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let translator = hub.read(cx).translator().clone();
         // hub 变化（含刚取到的额度）只重绘，不触发新的取数。
         cx.observe(&hub, |_, _, cx| cx.notify()).detach();
@@ -62,153 +48,54 @@ impl UsageTab {
         Self {
             hub,
             translator,
-            epoch: Instant::now(),
-            refresh: VisibleRefresh::new(MIN_REFRESH_MS),
-            request: 0,
-            loading: false,
-            loaded: false,
-            failed: false,
-        }
-    }
-
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-
-    /// 渲染时调用：首次显示 / 隐藏后再显示才会取数。
-    fn refresh_if_needed(&mut self, cx: &mut Context<Self>) {
-        let now = self.now_ms();
-        match self.refresh.on_render(now) {
-            Some(GateAction::Fetch) => self.start_fetch(cx),
-            Some(GateAction::Wait(delay)) => {
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(delay).await;
-                    let Ok(()) = this.update(cx, |this, cx| {
-                        this.refresh.timer_fired();
-                        cx.notify();
-                    }) else {
-                        return;
-                    };
-                })
-                .detach();
-            }
-            Some(GateAction::Skip) | None => {}
+            sync: UsageSync::new(),
         }
     }
 
     fn refresh_now(&mut self, cx: &mut Context<Self>) {
-        self.refresh.manual_started(self.now_ms());
-        self.start_fetch(cx);
-        cx.notify();
-    }
-
-    fn start_fetch(&mut self, cx: &mut Context<Self>) {
-        self.request += 1;
-        let request = self.request;
-        self.loading = true;
-        let future = self.hub.read(cx).api().usage_refresh();
-        cx.spawn(async move |this, cx| {
-            let result = future.await;
-            let Ok(()) = this.update(cx, |this, cx| {
-                if request != this.request {
-                    return;
-                }
-                this.loading = false;
-                this.loaded = true;
-                this.failed = result.is_err();
-                cx.notify();
-            }) else {
-                return;
-            };
-        })
-        .detach();
-    }
-
-    fn open_account(&self, window: &mut Window, cx: &mut App) {
-        let open = self.hub.read(cx).host().open_account.clone();
-        if let Some(open) = open {
-            open(window, cx);
-        }
+        let hub = self.hub.clone();
+        self.sync
+            .refresh_now(&hub, |this: &mut Self| &mut this.sync, cx);
     }
 }
 
-impl Render for UsageTab {
+impl Render for ShareUsageView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_if_needed(cx);
+        let hub = self.hub.clone();
+        self.sync
+            .refresh_if_needed(&hub, |this: &mut Self| &mut this.sync, cx);
         let tokens = active_theme(cx).tokens().clone();
         let translator = self.translator.read(cx).clone();
         let state = self.hub.read(cx).state();
         let usage = state.usage.clone();
-        let load_failed = self.failed || state.usage_error.is_some();
+        let load_failed = self.sync.failed || state.usage_error.is_some();
 
-        let page = v_flex()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .gap(tokens.spacing.lg)
-            .pb(tokens.spacing.lg);
-
-        let page = match usage {
-            Some(usage) => {
-                let mut page = page
-                    .child(self.render_header(&usage, &translator, cx))
-                    .child(self.render_meters(&usage, &translator, cx));
-                if load_failed {
-                    page = page.child(
-                        meta_text(cx)
-                            .text_color(tokens.colors.destructive)
-                            .child(text(&translator, "shareUsageLoadFailed")),
-                    );
-                }
-                if !usage.grants.is_empty() {
-                    page = page.child(render_grants(&usage, &translator, cx));
-                }
-                page.child(render_contribution(&usage, &translator, cx))
-                    .child(self.render_footer(&translator, cx))
-            }
-            None if load_failed => page.child(empty_state(
-                FluxIcon::Info,
-                None,
-                text(&translator, "shareUsageLoadFailed"),
-                None,
-                cx,
-            )),
-            None if self.loaded => page.child(self.render_login(&translator, cx)),
-            None => page.child(empty_state(
-                FluxIcon::Info,
-                None,
-                text(&translator, "shareDiagLoading"),
-                None,
-                cx,
-            )),
+        // 未登录 / 暂无数据：渲染空元素，不占位。
+        let Some(usage) = usage else {
+            return div();
         };
-        page.overflow_y_scrollbar().id("share-usage-scroll")
+        let mut page = v_flex()
+            .w_full()
+            .gap(tokens.spacing.lg)
+            .child(self.render_header(&usage, &translator, cx))
+            .child(self.render_meters(&usage, &translator, cx));
+        if load_failed {
+            page = page.child(
+                meta_text(cx)
+                    .text_color(tokens.colors.destructive)
+                    .child(text(&translator, "shareUsageLoadFailed")),
+            );
+        }
+        if !usage.grants.is_empty() {
+            page = page.child(render_grants(&usage, &translator, cx));
+        }
+        div()
+            .w_full()
+            .child(page.child(render_contribution(&usage, &translator, cx)))
     }
 }
 
-impl UsageTab {
-    fn render_login(&self, translator: &Translator, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .w_full()
-            .items_center()
-            .gap(tokens.spacing.md)
-            .child(empty_state(
-                FluxIcon::Info,
-                None,
-                text(translator, "shareUsageLogin"),
-                None,
-                cx,
-            ))
-            .child(
-                Button::new("share-usage-login")
-                    .primary()
-                    .label(text(translator, "shareUsageLogin"))
-                    .control(cx)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_account(window, cx))),
-            )
-    }
-
+impl ShareUsageView {
     fn render_header(
         &self,
         usage: &ShareUsageDto,
@@ -228,11 +115,11 @@ impl UsageTab {
             label.clone(),
             Icon::new(FluxIcon::RotateCw).size(active_theme(cx).extended().icon.md),
             ButtonVariant::Ghost,
-            self.loading,
+            self.sync.loading,
             cx,
         )
         .tooltip(tooltip_builder(label))
-        .disabled(self.loading)
+        .disabled(self.sync.loading)
         .on_click(cx.listener(|this, _, _, cx| this.refresh_now(cx)))
         .into_any_element();
         v_flex()
@@ -284,28 +171,6 @@ impl UsageTab {
             ));
         }
         block
-    }
-
-    fn render_footer(&self, translator: &Translator, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        h_flex()
-            .w_full()
-            .flex_wrap()
-            .gap(tokens.spacing.sm)
-            .child(
-                Button::new("share-usage-buy-pack")
-                    .primary()
-                    .label(text(translator, "shareUsageBuyPack"))
-                    .control(cx)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_account(window, cx))),
-            )
-            .child(
-                Button::new("share-usage-upgrade")
-                    .outline()
-                    .label(text(translator, "shareUsageUpgrade"))
-                    .control(cx)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_account(window, cx))),
-            )
     }
 }
 
@@ -504,10 +369,4 @@ fn render_contribution(usage: &ShareUsageDto, translator: &Translator, cx: &App)
             cx,
         ))
         .child(block)
-}
-
-impl UsageTab {
-    pub(super) fn create(hub: Entity<ShareHub>, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| Self::new(hub, cx))
-    }
 }

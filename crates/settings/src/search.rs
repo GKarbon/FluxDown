@@ -9,7 +9,7 @@ use gpui::{App, Entity, SharedString};
 use crate::sections::SectionContext;
 use crate::store::SettingsStore;
 use crate::ui::SettingsPage;
-use crate::view::{ActivityBarToggle, ReferralPage, build_pages};
+use crate::view::{ActivityBarToggle, ReferralPage, ShareSlots, build_pages};
 
 /// 面包屑分隔符。
 const CRUMB_SEPARATOR: &str = " › ";
@@ -97,7 +97,15 @@ fn pages_for(
     } else {
         ReferralPage::Hidden
     };
-    build_pages(&ctx, activity_bar, None, None, None, referral, cx)
+    build_pages(
+        &ctx,
+        activity_bar,
+        None,
+        ShareSlots::default(),
+        None,
+        referral,
+        cx,
+    )
 }
 
 fn flatten(pages: &[SettingsPage]) -> Vec<SettingsSearchEntry> {

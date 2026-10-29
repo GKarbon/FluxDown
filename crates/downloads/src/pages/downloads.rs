@@ -165,9 +165,11 @@ pub struct DownloadHostActions {
     pub share_tasks: Option<ShareTasksOpener>,
     /// FluxMesh接收任务角标上的「切换桥接」：参数为任务 id。`None` 时不显示该动作。
     pub share_switch_to_bridge: Option<IdOpener>,
-    /// FluxMesh接收任务角标上的「共享加速额度已用完 / 登录后可共享加速」chip：打开「额度与贡献」页签，
+    /// FluxMesh接收任务角标上的「共享加速额度已用完 / 登录后可共享加速」chip：打开设置 › 账户的额度，
     /// 参数为任务 id。`None` 时 chip 不可点击。
     pub share_open_usage: Option<IdOpener>,
+    /// 任务右键「停止共享」：停止该任务所属接收记录的共享，参数为接收记录 ID。`None` 时不显示该菜单项。
+    pub share_stop_providing: Option<IdOpener>,
     /// FluxMesh接收任务详情「传输诊断」页签内容；`None` 时不显示该页签。
     pub share_diagnostics_view: Option<ShareDiagnosticsViewFactory>,
     /// 新建下载对话框识别出分享链接后打开接收确认：参数为链接原文。
@@ -415,6 +417,7 @@ impl DownloadView {
             send: host.share_tasks.is_some(),
             switch_bridge: host.share_switch_to_bridge.is_some(),
             open_usage: host.share_open_usage.is_some(),
+            stop_providing: host.share_stop_providing.is_some(),
         });
         self.host = host;
     }
@@ -559,6 +562,7 @@ impl DownloadView {
             controller.queues(),
             selected_queue,
             controller.other_devices(),
+            controller.store().share().pickup_code_length(),
         )
     }
 
