@@ -25,6 +25,9 @@ pub(crate) struct SubmissionGate {
     boundary: Arc<tokio::sync::Mutex<()>>,
     controls: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub(crate) interruption: tokio::sync::watch::Sender<Option<String>>,
+    /// 系统打开 / 拖入的链接或种子文件被 agent 拒绝（分享链接解析失败、不支持等）：
+    /// 界面据此提示用户，而不是静默什么都不发生。每次发送都会唤醒订阅者。
+    pub(crate) capture_failure: tokio::sync::watch::Sender<Option<fluxdown_protocol::RpcErrorData>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -56,6 +59,7 @@ impl Default for SubmissionGate {
             boundary: Arc::new(tokio::sync::Mutex::new(())),
             controls: std::sync::Mutex::new(None),
             interruption: tokio::sync::watch::channel(None).0,
+            capture_failure: tokio::sync::watch::channel(None).0,
         }
     }
 }

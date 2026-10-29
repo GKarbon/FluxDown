@@ -756,10 +756,15 @@ pub(crate) fn submit_captures_detached(
         return finished;
     }
     let calls = capture_calls(client, urls, files);
+    let failures = client.clone();
     client.spawn_background(async move {
         for (kind, future) in calls {
             if let Err(error) = future.await {
                 log::warn!("failed to submit captured {kind}: {:?}", error.code);
+                failures
+                    .submissions
+                    .capture_failure
+                    .send_replace(Some(error));
             }
         }
         if done.send(()).is_err() {
