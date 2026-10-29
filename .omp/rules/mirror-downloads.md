@@ -12,9 +12,11 @@ globs:
   - '**/mobile/Android/core/src/main/java/com/fluxdown/core/model/Models.kt'
   - '**/mobile/Android/core/src/main/java/com/fluxdown/core/protocol/Devices.kt'
   - '**/mobile/Android/app/src/main/java/com/fluxdown/app/feature/downloads/DownloadsModel.kt'
+  - '**/mobile/Android/app/src/main/java/com/fluxdown/app/actions/TaskActions.kt'
   - '**/mobile/FluxDown/FluxKit/Sources/FluxDomain/Model/Models.swift'
   - '**/mobile/FluxDown/FluxKit/Sources/FluxDomain/Protocol/Devices.swift'
   - '**/mobile/FluxDown/FluxDown/Features/Downloads/DownloadsModel.swift'
+  - '**/mobile/FluxDown/FluxDown/Actions/TaskMenu.swift'
 interruptMode: never
 ---
 
@@ -36,9 +38,9 @@ interruptMode: never
 
 → `web/src/pages/downloads/dialogs/model.ts::parseEntries` + `aria2c.ts`（`parseCommand` / `joinContinuations` / `planFieldFill`）逐条对齐，`aria2c.test.ts` 覆盖同组行为；TXT 导入两端都用「原文保留、按 URL 去重追加」（`append_entries` ↔ `appendEntries`）
 
-## `crates/downloads/src/components/task_table.rs::TaskMenuFacts::{can_change_url, can_change_segments, can_verify_integrity}`（`task_menu_facts_for` 为右键 / 应用菜单与详情常规页按钮共用事实源）+ `pages/task_edit.rs`（`open_change_url_dialog` / `open_change_segments_dialog`，下载页与 `task_detail.rs` 常规页共用；失败任务换链 / 改线程数成功后串行 Resume）+ `pages/task_verify.rs`（BT 完整性校验结果通知：损坏文件列前 3 个、其余折叠计数，`conflict` = 已在校验）
+## `crates/downloads/src/components/task_table.rs::TaskMenuFacts::{can_rename, can_change_url, can_change_segments, can_verify_integrity}`（`task_menu_facts_for` 为右键 / 应用菜单与详情常规页按钮共用事实源；应用菜单项不置灰，`on_rename_selected` 等入口按同一事实源再判）+ `pages/task_edit.rs`（`open_change_url_dialog` / `open_change_segments_dialog`，下载页与 `task_detail.rs` 常规页共用；失败任务换链 / 改线程数成功后串行 Resume）+ `pages/task_verify.rs`（BT 完整性校验结果通知：损坏文件列前 3 个、其余折叠计数，`conflict` = 已在校验）
 
-→ `web/src/pages/downloads/model/taskEdit.ts::{canChangeUrl, canChangeSegments, canVerifyIntegrity, parseTaskSegments}` + `table/menus.ts` 与 `detail/GeneralTab.tsx` 两处入口 + `dialogs/TaskEditDialogs.tsx`（`resumeIfFailed`）+ `model/actions.ts::verifyTaskIntegrity`；换链源仅 http(s)/ftp（对齐引擎 `change_task_url`）
+→ `web/src/pages/downloads/model/taskEdit.ts::{canRename, canChangeUrl, canChangeSegments, canVerifyIntegrity, parseTaskSegments}` + `table/menus.ts` 与 `detail/GeneralTab.tsx` 两处入口 + `dialogs/TaskEditDialogs.tsx`（`resumeIfFailed`）+ `model/actions.ts::verifyTaskIntegrity`；换链源仅 http(s)/ftp（对齐引擎 `change_task_url`）；重命名 = 本地非 BT 且非下载 / 准备中（对齐引擎 `rename_task`），Android `actions/TaskActions.kt` 与 iOS `Actions/TaskMenu.swift` 同条件（`!status.isActive && protocol != Bt`）
 
 ## `crates/downloads/src/model/dispatch.rs::remote_action_applies`（远程命令适用状态）
 

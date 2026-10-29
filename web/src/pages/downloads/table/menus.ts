@@ -59,7 +59,7 @@ import {
   verifyTaskIntegrity,
 } from '../model/actions'
 import { remoteCan } from '../model/batchPlan'
-import { canChangeSegments, canChangeUrl, canVerifyIntegrity } from '../model/taskEdit'
+import { canChangeSegments, canChangeUrl, canRename, canVerifyIntegrity } from '../model/taskEdit'
 import { canPause, canResumeSeeding } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import { anyActive, anyResumable } from '../model/groupTree'
@@ -190,7 +190,7 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
       onSelect: () => openSharePanel(views.map((view) => view.taskId)),
     })
   }
-  if (only && only.source === 'local') {
+  if (only && canRename(only)) {
     entries.push({ type: 'item', key: 'rename', label: t('renameTask'), icon: Pen, onSelect: () => openRename(only.taskId) })
   }
   if (only && canChangeUrl(only)) {

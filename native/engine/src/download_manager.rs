@@ -13931,6 +13931,10 @@ impl DownloadManager {
     ///   路径按 `save_dir/file_name + TEMP_EXT` 重建，改名后无缝续传）、
     ///   DASH 音轨 sidecar 及其临时文件。均不存在时仅改 DB（未开始/文件丢失）。
     /// - 目标名已被磁盘占用即拒绝，绝不覆盖既有文件。
+    /// - 新名必须是 [`naming::sanitize_filename`] 的不动点：各下载器（HTTP / FTP /
+    ///   HLS / DASH / eD2K）续传时都按清洗后的名字重建 `.fdownloading` 路径，
+    ///   清洗会改写的名字（Windows 非法字符、保留设备名、首尾点 / 空格、超长）
+    ///   改名后续传找不到临时文件，进度归零并遗留孤儿临时文件。
     pub async fn rename_task(&mut self, task_id: &str, new_name: &str) -> Result<(), String> {
         let new_name = new_name.trim();
         if !is_safe_file_name(new_name) {
@@ -13953,6 +13957,11 @@ impl DownloadManager {
         }
         if t.file_name == new_name {
             return Ok(());
+        }
+        // 名字未变时上面已直接放行：`out=` 等入口落库的未清洗原名（起跑前尚未被下载器改写）
+        // 原样确认不应报错。
+        if naming::sanitize_filename(new_name) != new_name {
+            return Err("invalid-name".to_string());
         }
         async fn rollback_rename(
             paths: &[Option<(&Path, &Path)>; 4],
@@ -19892,6 +19901,28 @@ mod tests {
         assert_eq!(
             mgr.rename_task("r1", "../escape.bin").await,
             Err("invalid-name".to_string())
+        );
+        // 下载器续传按 `sanitize_filename` 重建临时文件路径：清洗会改写的名字一律拒绝，
+        // 否则改名后续传找不到 `.fdownloading`，进度归零并留下孤儿临时文件。
+        let too_long = format!("{}.bin", "a".repeat(200));
+        for name in [
+            "a:b.bin",
+            "what?.bin",
+            "CON.txt",
+            "name.",
+            "a/b.bin",
+            "a\u{202E}nib.exe",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                mgr.rename_task("r1", name).await,
+                Err("invalid-name".to_string()),
+                "{name:?}"
+            );
+        }
+        assert!(
+            dir.join("a.bin").exists(),
+            "rejected names leave the file alone"
         );
         assert_eq!(
             mgr.rename_task("r-bt", "renamed").await,

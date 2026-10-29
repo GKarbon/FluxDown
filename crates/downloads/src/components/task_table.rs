@@ -434,6 +434,8 @@ pub(crate) struct TaskMenuFacts {
     /// 任务可被控制（暂停 / 继续 / 删除）。远程任务云端状态未知时为 `false`。
     pub(crate) controllable: bool,
     pub(crate) state: TaskState,
+    /// 引擎原始 status 为 5（准备中，展示态归入 `Pending`）：引擎视同下载中。
+    pub(crate) preparing: bool,
     pub(crate) boosted: bool,
     /// `url` 是否为 BT 哨兵值 `torrent-file://…`（不可重新下载）。
     pub(crate) is_torrent_sentinel: bool,
@@ -489,6 +491,13 @@ impl TaskMenuFacts {
             )
     }
 
+    /// 「重命名」可用：本地非 BT、不在下载 / 准备中的任务（对齐引擎 `rename_task`：
+    /// 活跃任务返回 `task-active`；BT 落盘名由完成布局决定且做种期间持有句柄，返回
+    /// `bt-unsupported`）。eD2K 与 HTTP 同样以 `<名>.fdownloading` 续传，可改名。
+    pub(crate) fn can_rename(&self) -> bool {
+        self.is_local && !self.is_bt && self.state != TaskState::Downloading && !self.preparing
+    }
+
     /// 「修改线程数」可用：本地非 BT、未完成的任务（下载中也可，引擎静默暂停后恢复）。
     pub(crate) fn can_change_segments(&self) -> bool {
         self.is_local && !self.is_bt && self.state != TaskState::Completed
@@ -521,6 +530,7 @@ pub(crate) fn task_menu_facts_for(store: &TaskStore, key: &RowKey) -> Option<Tas
         is_local: key.is_local(),
         controllable: row.remote_status != Some(RemoteTaskStatus::Unknown),
         state: row.state,
+        preparing: row.preparing,
         boosted: row.boosted,
         is_torrent_sentinel: row.url.starts_with("torrent-file://"),
         is_bt: is_bt_url(&row.url),
@@ -623,7 +633,7 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
         items.push(MenuEntry::CopyFile);
     }
     if let [only] = selection
-        && only.is_local
+        && only.can_rename()
     {
         items.push(MenuEntry::Rename);
     }
@@ -5643,6 +5653,7 @@ mod context_menu_tests {
             is_local,
             controllable: true,
             state,
+            preparing: false,
             boosted: false,
             is_torrent_sentinel: false,
             is_bt: false,
@@ -6026,6 +6037,47 @@ mod context_menu_tests {
                 MenuEntry::ShowDetail,
             ]
         );
+    }
+
+    #[test]
+    fn rename_is_offered_only_where_the_engine_accepts_it() {
+        // 引擎 `rename_task`：BT 任务一律 `bt-unsupported`，下载 / 准备中 `task-active`。
+        for state in [
+            TaskState::Pending,
+            TaskState::Paused,
+            TaskState::Failed,
+            TaskState::Completed,
+        ] {
+            assert!(
+                context_menu_items(&[task(true, state)]).contains(&MenuEntry::Rename),
+                "{state:?}"
+            );
+            let bt = TaskMenuFacts {
+                is_bt: true,
+                url_replaceable: false,
+                ..task(true, state)
+            };
+            assert!(
+                !context_menu_items(&[bt]).contains(&MenuEntry::Rename),
+                "BT {state:?}"
+            );
+        }
+        let preparing = TaskMenuFacts {
+            preparing: true,
+            ..task(true, TaskState::Pending)
+        };
+        for facts in [
+            task(true, TaskState::Downloading),
+            preparing,
+            task(false, TaskState::Paused),
+        ] {
+            assert!(
+                !context_menu_items(&[facts]).contains(&MenuEntry::Rename),
+                "{facts:?}"
+            );
+        }
+        let paused = task(true, TaskState::Paused);
+        assert!(!context_menu_items(&[paused, paused]).contains(&MenuEntry::Rename));
     }
 
     #[test]

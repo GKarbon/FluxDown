@@ -19,7 +19,7 @@ use crate::{
     components::{
         task_table::{
             DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
-            spawn_midnight_refresh,
+            spawn_midnight_refresh, task_menu_facts_for,
         },
         title_bar::{DownloadSearchBox, DownloadTitleBar, DownloadViewMenu},
     },
@@ -1589,7 +1589,10 @@ impl DownloadView {
         self.search_revealed || !self.search_input.read(cx).value().is_empty()
     }
 
-    /// 内联重命名对话框（单选本地任务）；确认后写 `DownloadsCommand::Rename`。
+    /// 内联重命名对话框（单选、满足 [`TaskMenuFacts::can_rename`] 的任务；应用菜单不置灰，
+    /// 入口须按同一事实源再判）；确认后写 `DownloadsCommand::Rename`。
+    ///
+    /// [`TaskMenuFacts::can_rename`]: crate::components::task_table::TaskMenuFacts::can_rename
     fn on_rename_selected(
         &mut self,
         _: &RenameSelected,
